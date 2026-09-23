@@ -26,3 +26,7 @@ The app currently includes connection profiles, NATS CLI context and `.creds` im
 NATS integration tests can run against local servers by setting `NATS_URL` to a JetStream-enabled server and `NATS_NO_JS_URL` to a server without JetStream before running `cargo test --test nats_integration`. Without those variables the integration tests return without connecting.
 
 GitHub Actions checks formatting, compilation, Clippy, and tests on Linux and macOS. The Linux job also runs the integration suite against local JetStream-enabled and core-only NATS servers.
+
+## Releases
+
+Use **Actions → Prepare Release → Run workflow** on `main` and enter a SemVer version. The workflow updates the changelog and Cargo version, then opens a release-preparation PR. After that PR is merged, create and push the matching `vX.Y.Z` tag. The generated `Release` workflow builds Linux/macOS artifacts for x86_64 and ARM64, creates checksums and a shell installer, and publishes them to GitHub Releases.

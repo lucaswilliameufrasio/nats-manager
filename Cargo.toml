@@ -2,6 +2,8 @@
 name = "nats-manager"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/lucaswilliameufrasio/nats-manager"
+description = "Desktop application for managing NATS clusters"
 
 [package.metadata.bundle]
 name = "NATS Manager"
@@ -34,3 +36,8 @@ webpki-roots = "1.0.9"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
