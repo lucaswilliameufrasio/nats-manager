@@ -43,6 +43,10 @@ struct NatsCliContext {
     ca: String,
     #[serde(default)]
     tls_first: bool,
+    #[serde(default)]
+    jetstream_domain: String,
+    #[serde(default)]
+    jetstream_api_prefix: String,
 }
 
 pub fn import_context(path: impl AsRef<Path>) -> Result<ImportedContext, String> {
@@ -143,6 +147,8 @@ pub fn import_context(path: impl AsRef<Path>) -> Result<ImportedContext, String>
             .collect();
         let mut profile = ConnectionProfile::new(name, servers, authentication);
         profile.tls = tls;
+        profile.jetstream_api_prefix =
+            jetstream_api_prefix(&context.jetstream_api_prefix, &context.jetstream_domain);
         Ok(profile)
     })();
 
@@ -157,6 +163,16 @@ pub fn import_context(path: impl AsRef<Path>) -> Result<ImportedContext, String>
             }
             Err(error)
         }
+    }
+}
+
+fn jetstream_api_prefix(api_prefix: &str, domain: &str) -> Option<String> {
+    if !api_prefix.is_empty() {
+        Some(api_prefix.to_owned())
+    } else if !domain.is_empty() {
+        Some(format!("$JS.{domain}.API"))
+    } else {
+        None
     }
 }
 
@@ -249,17 +265,27 @@ fn import_optional_material(
 mod tests {
     use base64::Engine;
 
-    use super::{MaterialKind, NatsCliContext, load_material, reject_external_resolver};
+    use super::{
+        MaterialKind, NatsCliContext, jetstream_api_prefix, load_material, reject_external_resolver,
+    };
 
     #[test]
     fn nats_cli_context_fields_match_the_supported_import_shape() {
         let context: NatsCliContext = serde_json::from_str(
-            r#"{"description":"production","url":"tls://nats.example:4222","user":"agent","password":"not-in-profile"}"#,
+            r#"{"description":"production","url":"tls://nats.example:4222","user":"agent","password":"not-in-profile","jetstream_domain":"orders"}"#,
         )
         .expect("context JSON should deserialize");
         assert_eq!(context.description, "production");
         assert_eq!(context.url, "tls://nats.example:4222");
         assert_eq!(context.user, "agent");
+        assert_eq!(
+            jetstream_api_prefix("", &context.jetstream_domain).as_deref(),
+            Some("$JS.orders.API")
+        );
+        assert_eq!(
+            jetstream_api_prefix("$JS.custom.API", &context.jetstream_domain).as_deref(),
+            Some("$JS.custom.API")
+        );
     }
 
     #[test]

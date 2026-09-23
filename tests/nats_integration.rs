@@ -20,7 +20,9 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
         eprintln!("Skipping JetStream integration test: NATS_URL is not set");
         return;
     };
-    let (client, status, _) = connection::connect_profile(profile_for(url))
+    let mut profile = profile_for(url);
+    profile.jetstream_api_prefix = Some("$JS.API".to_owned());
+    let (client, status, _) = connection::connect_profile(profile)
         .await
         .expect("should connect to NATS");
     assert!(matches!(status, JetStreamStatus::Enabled { .. }));
@@ -30,26 +32,33 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
     let subject = format!("nats_manager_test.{unique}");
     let consumer = format!("nats_manager_consumer_{unique}");
 
-    jetstream::create_stream(client.clone(), stream.clone(), subject.clone())
+    jetstream::create_stream(client.clone(), stream.clone(), subject.clone(), None)
         .await
         .expect("stream should be created");
-    let details = jetstream::describe_stream(client.clone(), stream.clone())
+    let details = jetstream::describe_stream(client.clone(), stream.clone(), None)
         .await
         .expect("stream details should load");
     assert_eq!(details.subjects, vec![subject.clone()]);
     assert!(
-        jetstream::list_streams(client.clone())
+        jetstream::list_streams(client.clone(), None)
             .await
             .expect("stream listing should work")
             .contains(&stream)
     );
 
-    jetstream::create_pull_consumer(client.clone(), stream.clone(), consumer.clone())
+    jetstream::create_pull_consumer(client.clone(), stream.clone(), consumer.clone(), None)
         .await
         .expect("consumer should be created");
-    jetstream::update_consumer_limits(client.clone(), stream.clone(), consumer.clone(), 3, 15)
-        .await
-        .expect("consumer limits should be updated");
+    jetstream::update_consumer_limits(
+        client.clone(),
+        stream.clone(),
+        consumer.clone(),
+        3,
+        15,
+        None,
+    )
+    .await
+    .expect("consumer limits should be updated");
     let consumer_info = async_nats::jetstream::new(client.clone())
         .get_stream(stream.clone())
         .await
@@ -60,18 +69,23 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
     assert_eq!(consumer_info.config.max_deliver, 3);
     assert_eq!(consumer_info.config.ack_wait.as_secs(), 15);
     assert!(
-        jetstream::list_consumers(client.clone(), stream.clone())
+        jetstream::list_consumers(client.clone(), stream.clone(), None)
             .await
             .expect("consumer listing should work")
             .contains(&consumer)
     );
 
     let updated_subject = format!("{subject}.updated");
-    jetstream::update_stream_subject(client.clone(), stream.clone(), updated_subject.clone())
-        .await
-        .expect("stream subject should be updated");
+    jetstream::update_stream_subject(
+        client.clone(),
+        stream.clone(),
+        updated_subject.clone(),
+        None,
+    )
+    .await
+    .expect("stream subject should be updated");
     assert_eq!(
-        jetstream::describe_stream(client.clone(), stream.clone())
+        jetstream::describe_stream(client.clone(), stream.clone(), None)
             .await
             .expect("updated stream details should load")
             .subjects,
@@ -83,10 +97,11 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
         updated_subject.clone(),
         b"first payload".to_vec(),
         true,
+        None,
     )
     .await
     .expect("message should be published and acknowledged");
-    let messages = jetstream::inspect_recent_messages(client.clone(), stream.clone(), 20)
+    let messages = jetstream::inspect_recent_messages(client.clone(), stream.clone(), 20, None)
         .await
         .expect("messages should be inspectable");
     let message = messages
@@ -99,30 +114,31 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
         client.clone(),
         message.subject.clone(),
         message.payload.clone(),
+        None,
     )
     .await
     .expect("message replay should be acknowledged");
     assert_eq!(
-        jetstream::inspect_recent_messages(client.clone(), stream.clone(), 20)
+        jetstream::inspect_recent_messages(client.clone(), stream.clone(), 20, None)
             .await
             .expect("replayed message should be inspectable")
             .len(),
         2
     );
 
-    jetstream::purge_stream(client.clone(), stream.clone())
+    jetstream::purge_stream(client.clone(), stream.clone(), None)
         .await
         .expect("stream messages should be purged");
     assert!(
-        jetstream::inspect_recent_messages(client.clone(), stream.clone(), 20)
+        jetstream::inspect_recent_messages(client.clone(), stream.clone(), 20, None)
             .await
             .expect("purged stream should be inspectable")
             .is_empty()
     );
-    jetstream::delete_consumer(client.clone(), stream.clone(), consumer)
+    jetstream::delete_consumer(client.clone(), stream.clone(), consumer, None)
         .await
         .expect("consumer should be deleted");
-    jetstream::delete_stream(client, stream)
+    jetstream::delete_stream(client, stream, None)
         .await
         .expect("stream should be deleted");
 }
@@ -143,7 +159,7 @@ async fn connection_reports_when_jetstream_is_unavailable() {
         .subscribe(subject.clone())
         .await
         .expect("subscription should be created");
-    jetstream::publish(client, subject, b"core payload".to_vec(), false)
+    jetstream::publish(client, subject, b"core payload".to_vec(), false, None)
         .await
         .expect("core NATS publish should succeed without JetStream");
     let message = subscriber

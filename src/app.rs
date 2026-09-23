@@ -31,6 +31,7 @@ pub struct NatsManagerApp {
     event_sender: Sender<UiEvent>,
     active_client: Option<async_nats::Client>,
     server_info: Option<async_nats::ServerInfo>,
+    jetstream_api_prefix: Option<String>,
     jetstream_status: Option<JetStreamStatus>,
     profile_store: Option<ProfileStore>,
     profiles: Vec<ConnectionProfile>,
@@ -77,6 +78,7 @@ impl NatsManagerApp {
             event_sender,
             active_client: None,
             server_info: None,
+            jetstream_api_prefix: None,
             jetstream_status: None,
             profile_store,
             profiles,
@@ -363,6 +365,7 @@ impl NatsManagerApp {
     fn spawn_connection(&mut self, profile: ConnectionProfile) {
         self.active_client = None;
         self.server_info = None;
+        self.jetstream_api_prefix = profile.jetstream_api_prefix.clone();
         self.jetstream_status = None;
         let sender = self.event_sender.clone();
         self.runtime.spawn(async move {
@@ -377,9 +380,10 @@ impl NatsManagerApp {
             return;
         };
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.runtime.spawn(async move {
             let _ = sender.send(UiEvent::Streams(
-                nats_manager::jetstream::list_streams(client).await,
+                nats_manager::jetstream::list_streams(client, api_prefix).await,
             ));
         });
     }
@@ -391,8 +395,10 @@ impl NatsManagerApp {
             return;
         };
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.runtime.spawn(async move {
-            let result = nats_manager::jetstream::list_consumers(client, stream_name).await;
+            let result =
+                nats_manager::jetstream::list_consumers(client, stream_name, api_prefix).await;
             let _ = sender.send(UiEvent::Consumers(result));
         });
     }
@@ -403,8 +409,9 @@ impl NatsManagerApp {
             return;
         };
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.runtime.spawn(async move {
-            let result = nats_manager::jetstream::describe_stream(client, name).await;
+            let result = nats_manager::jetstream::describe_stream(client, name, api_prefix).await;
             let _ = sender.send(UiEvent::StreamDetails(result));
         });
     }
@@ -418,10 +425,15 @@ impl NatsManagerApp {
             return;
         };
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.runtime.spawn(async move {
-            let result =
-                nats_manager::jetstream::describe_consumer(client, stream_name, consumer_name)
-                    .await;
+            let result = nats_manager::jetstream::describe_consumer(
+                client,
+                stream_name,
+                consumer_name,
+                api_prefix,
+            )
+            .await;
             let _ = sender.send(UiEvent::ConsumerDetails(result));
         });
     }
@@ -461,8 +473,9 @@ impl NatsManagerApp {
         }
         self.jetstream_message = format!("Creating stream {name}…");
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.runtime.spawn(async move {
-            let result = nats_manager::jetstream::create_stream(client, name, subject)
+            let result = nats_manager::jetstream::create_stream(client, name, subject, api_prefix)
                 .await
                 .map(|()| "Stream created".to_owned());
             let _ = sender.send(UiEvent::Operation(result));
@@ -480,7 +493,10 @@ impl NatsManagerApp {
             return;
         }
         self.run_operation(nats_manager::jetstream::update_stream_subject(
-            client, name, subject,
+            client,
+            name,
+            subject,
+            self.jetstream_api_prefix.clone(),
         ));
     }
 
@@ -495,7 +511,11 @@ impl NatsManagerApp {
         }
         self.resource_name_confirmation.clear();
         self.jetstream_message = format!("Deleting stream {name}…");
-        self.run_operation(nats_manager::jetstream::delete_stream(client, name));
+        self.run_operation(nats_manager::jetstream::delete_stream(
+            client,
+            name,
+            self.jetstream_api_prefix.clone(),
+        ));
     }
 
     fn create_consumer(&mut self) {
@@ -514,6 +534,7 @@ impl NatsManagerApp {
             client,
             stream_name,
             name,
+            self.jetstream_api_prefix.clone(),
         ));
     }
 
@@ -545,6 +566,7 @@ impl NatsManagerApp {
             consumer_name,
             max_deliver,
             ack_wait_seconds,
+            self.jetstream_api_prefix.clone(),
         ));
     }
 
@@ -569,6 +591,7 @@ impl NatsManagerApp {
             client,
             stream_name,
             consumer_name,
+            self.jetstream_api_prefix.clone(),
         ));
     }
 
@@ -579,10 +602,16 @@ impl NatsManagerApp {
             return;
         };
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.jetstream_message = format!("Loading recent messages from {stream_name}…");
         self.runtime.spawn(async move {
-            let result =
-                nats_manager::jetstream::inspect_recent_messages(client, stream_name, 20).await;
+            let result = nats_manager::jetstream::inspect_recent_messages(
+                client,
+                stream_name,
+                20,
+                api_prefix,
+            )
+            .await;
             let _ = sender.send(UiEvent::Messages(result));
         });
     }
@@ -603,10 +632,12 @@ impl NatsManagerApp {
                 Some(JetStreamStatus::Enabled { .. })
             );
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.jetstream_message = format!("Publishing to {subject}…");
         self.runtime.spawn(async move {
             let result =
-                nats_manager::jetstream::publish(client, subject, payload, jetstream).await;
+                nats_manager::jetstream::publish(client, subject, payload, jetstream, api_prefix)
+                    .await;
             let _ = sender.send(UiEvent::Operation(result));
         });
         self.publish_payload.clear();
@@ -628,6 +659,7 @@ impl NatsManagerApp {
             client,
             message.subject.clone(),
             message.payload.clone(),
+            self.jetstream_api_prefix.clone(),
         ));
     }
 
@@ -645,7 +677,11 @@ impl NatsManagerApp {
             return;
         }
         self.resource_name_confirmation.clear();
-        self.run_reported_operation(nats_manager::jetstream::purge_stream(client, stream_name));
+        self.run_reported_operation(nats_manager::jetstream::purge_stream(
+            client,
+            stream_name,
+            self.jetstream_api_prefix.clone(),
+        ));
     }
 }
 

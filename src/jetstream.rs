@@ -21,8 +21,24 @@ pub struct ConsumerDetails {
     pub max_deliver: i64,
 }
 
-pub async fn list_streams(client: async_nats::Client) -> Result<Vec<String>, String> {
-    let context = async_nats::jetstream::new(client);
+fn jetstream_context(
+    client: async_nats::Client,
+    api_prefix: Option<String>,
+) -> async_nats::jetstream::Context {
+    if let Some(prefix) = api_prefix {
+        async_nats::jetstream::ContextBuilder::new()
+            .api_prefix(prefix)
+            .build(client)
+    } else {
+        async_nats::jetstream::new(client)
+    }
+}
+
+pub async fn list_streams(
+    client: async_nats::Client,
+    api_prefix: Option<String>,
+) -> Result<Vec<String>, String> {
+    let context = jetstream_context(client, api_prefix);
     let mut names = context.stream_names();
     let mut streams = Vec::new();
 
@@ -36,8 +52,9 @@ pub async fn list_streams(client: async_nats::Client) -> Result<Vec<String>, Str
 pub async fn list_consumers(
     client: async_nats::Client,
     stream_name: String,
+    api_prefix: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let context = async_nats::jetstream::new(client);
+    let context = jetstream_context(client, api_prefix);
     let stream = context
         .get_stream(stream_name)
         .await
@@ -56,8 +73,9 @@ pub async fn create_stream(
     client: async_nats::Client,
     name: String,
     subject: String,
+    api_prefix: Option<String>,
 ) -> Result<(), String> {
-    let context = async_nats::jetstream::new(client);
+    let context = jetstream_context(client, api_prefix);
     context
         .create_stream(async_nats::jetstream::stream::Config {
             name,
@@ -72,8 +90,9 @@ pub async fn create_stream(
 pub async fn describe_stream(
     client: async_nats::Client,
     name: String,
+    api_prefix: Option<String>,
 ) -> Result<StreamDetails, String> {
-    let stream = async_nats::jetstream::new(client)
+    let stream = jetstream_context(client, api_prefix)
         .get_stream(name)
         .await
         .map_err(|error| error.to_string())?;
@@ -90,8 +109,9 @@ pub async fn update_stream_subject(
     client: async_nats::Client,
     name: String,
     subject: String,
+    api_prefix: Option<String>,
 ) -> Result<(), String> {
-    let context = async_nats::jetstream::new(client);
+    let context = jetstream_context(client, api_prefix);
     let stream = context
         .get_stream(name)
         .await
@@ -105,8 +125,12 @@ pub async fn update_stream_subject(
         .map_err(|error| error.to_string())
 }
 
-pub async fn delete_stream(client: async_nats::Client, name: String) -> Result<(), String> {
-    async_nats::jetstream::new(client)
+pub async fn delete_stream(
+    client: async_nats::Client,
+    name: String,
+    api_prefix: Option<String>,
+) -> Result<(), String> {
+    jetstream_context(client, api_prefix)
         .delete_stream(name)
         .await
         .map(|_| ())
@@ -117,8 +141,9 @@ pub async fn create_pull_consumer(
     client: async_nats::Client,
     stream_name: String,
     consumer_name: String,
+    api_prefix: Option<String>,
 ) -> Result<(), String> {
-    let context = async_nats::jetstream::new(client);
+    let context = jetstream_context(client, api_prefix);
     let stream = context
         .get_stream(stream_name)
         .await
@@ -139,11 +164,12 @@ pub async fn update_consumer_limits(
     consumer_name: String,
     max_deliver: i64,
     ack_wait_seconds: u64,
+    api_prefix: Option<String>,
 ) -> Result<(), String> {
     if max_deliver < 0 {
         return Err("maximum deliveries cannot be negative".to_owned());
     }
-    let stream = async_nats::jetstream::new(client)
+    let stream = jetstream_context(client, api_prefix)
         .get_stream(stream_name)
         .await
         .map_err(|error| error.to_string())?;
@@ -164,8 +190,9 @@ pub async fn describe_consumer(
     client: async_nats::Client,
     stream_name: String,
     consumer_name: String,
+    api_prefix: Option<String>,
 ) -> Result<ConsumerDetails, String> {
-    let stream = async_nats::jetstream::new(client)
+    let stream = jetstream_context(client, api_prefix)
         .get_stream(stream_name)
         .await
         .map_err(|error| error.to_string())?;
@@ -183,8 +210,9 @@ pub async fn delete_consumer(
     client: async_nats::Client,
     stream_name: String,
     consumer_name: String,
+    api_prefix: Option<String>,
 ) -> Result<(), String> {
-    let context = async_nats::jetstream::new(client);
+    let context = jetstream_context(client, api_prefix);
     let stream = context
         .get_stream(stream_name)
         .await
@@ -200,8 +228,9 @@ pub async fn inspect_recent_messages(
     client: async_nats::Client,
     stream_name: String,
     limit: usize,
+    api_prefix: Option<String>,
 ) -> Result<Vec<StoredMessage>, String> {
-    let context = async_nats::jetstream::new(client);
+    let context = jetstream_context(client, api_prefix);
     let stream = context
         .get_stream(stream_name)
         .await
@@ -236,9 +265,10 @@ pub async fn publish(
     subject: String,
     payload: Vec<u8>,
     jetstream: bool,
+    api_prefix: Option<String>,
 ) -> Result<String, String> {
     if jetstream {
-        let ack = async_nats::jetstream::new(client)
+        let ack = jetstream_context(client, api_prefix)
             .publish(subject, payload.into())
             .await
             .map_err(|error| error.to_string())?
@@ -257,8 +287,9 @@ pub async fn publish(
 pub async fn purge_stream(
     client: async_nats::Client,
     stream_name: String,
+    api_prefix: Option<String>,
 ) -> Result<String, String> {
-    let stream = async_nats::jetstream::new(client)
+    let stream = jetstream_context(client, api_prefix)
         .get_stream(stream_name)
         .await
         .map_err(|error| error.to_string())?;
@@ -270,8 +301,9 @@ pub async fn replay_message(
     client: async_nats::Client,
     subject: String,
     payload: Vec<u8>,
+    api_prefix: Option<String>,
 ) -> Result<String, String> {
-    let ack = async_nats::jetstream::new(client)
+    let ack = jetstream_context(client, api_prefix)
         .publish(subject, payload.into())
         .await
         .map_err(|error| error.to_string())?

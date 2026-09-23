@@ -11,6 +11,8 @@ pub struct ConnectionProfile {
     pub authentication: Authentication,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    #[serde(default)]
+    pub jetstream_api_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -58,6 +60,7 @@ impl ConnectionProfile {
             servers,
             authentication,
             tls: None,
+            jetstream_api_prefix: None,
         }
     }
 }

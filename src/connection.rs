@@ -90,10 +90,14 @@ pub async fn connect_profile(
         .await
         .map_err(|error| error.to_string())?;
 
-    let jetstream_status = match async_nats::jetstream::new(client.clone())
-        .query_account()
-        .await
-    {
+    let jetstream_context = if let Some(prefix) = profile.jetstream_api_prefix.clone() {
+        async_nats::jetstream::ContextBuilder::new()
+            .api_prefix(prefix)
+            .build(client.clone())
+    } else {
+        async_nats::jetstream::new(client.clone())
+    };
+    let jetstream_status = match jetstream_context.query_account().await {
         Ok(account) => JetStreamStatus::Enabled {
             streams: account.streams,
             consumers: account.consumers,
