@@ -7,7 +7,13 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub enum JetStreamStatus {
-    Enabled,
+    Enabled {
+        streams: usize,
+        consumers: usize,
+        memory_bytes: u64,
+        storage_bytes: u64,
+        domain: Option<String>,
+    },
     Unavailable(String),
 }
 
@@ -44,7 +50,13 @@ pub async fn connect_profile(
         .query_account()
         .await
     {
-        Ok(_) => JetStreamStatus::Enabled,
+        Ok(account) => JetStreamStatus::Enabled {
+            streams: account.streams,
+            consumers: account.consumers,
+            memory_bytes: account.memory,
+            storage_bytes: account.storage,
+            domain: account.domain,
+        },
         Err(error) => JetStreamStatus::Unavailable(error.to_string()),
     };
 

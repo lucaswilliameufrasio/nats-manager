@@ -4,13 +4,14 @@ use eframe::egui;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
-use crate::connection::{self, JetStreamStatus};
-use crate::profile::{Authentication, ConnectionProfile, ProfileStore};
+use nats_manager::connection::{self, JetStreamStatus};
+use nats_manager::profile::{Authentication, ConnectionProfile, ProfileStore};
 
 enum UiEvent {
     Connected(Result<(async_nats::Client, JetStreamStatus, String), String>),
     Streams(Result<Vec<String>, String>),
     Consumers(Result<Vec<String>, String>),
+    Messages(Result<Vec<nats_manager::jetstream::StoredMessage>, String>),
     Operation(Result<String, String>),
 }
 
@@ -37,6 +38,11 @@ pub struct NatsManagerApp {
     new_stream_subject: String,
     new_consumer_name: String,
     jetstream_message: String,
+    messages: Vec<nats_manager::jetstream::StoredMessage>,
+    selected_message: Option<u64>,
+    publish_subject: String,
+    publish_payload: String,
+    publish_via_jetstream: bool,
 }
 
 impl NatsManagerApp {
@@ -71,6 +77,11 @@ impl NatsManagerApp {
             new_stream_subject: String::new(),
             new_consumer_name: String::new(),
             jetstream_message: String::new(),
+            messages: Vec::new(),
+            selected_message: None,
+            publish_subject: String::new(),
+            publish_payload: String::new(),
+            publish_via_jetstream: false,
         }
     }
 
@@ -114,7 +125,7 @@ impl NatsManagerApp {
             else {
                 unreachable!("password authentication was selected")
             };
-            if let Err(error) = crate::credentials::store(credential_key, &self.password) {
+            if let Err(error) = nats_manager::credentials::store(credential_key, &self.password) {
                 self.status = format!("Could not save password to system keychain: {error}");
                 return;
             }
@@ -131,7 +142,7 @@ impl NatsManagerApp {
             Err(error) => {
                 if let Authentication::UserPassword { credential_key, .. } = profile.authentication
                 {
-                    let _ = crate::credentials::delete(&credential_key);
+                    let _ = nats_manager::credentials::delete(&credential_key);
                 }
                 self.status = format!("Could not save profile: {error}");
             }
@@ -184,7 +195,7 @@ impl NatsManagerApp {
         };
 
         let credential_key = format!("{}:creds", Uuid::new_v4());
-        if let Err(error) = crate::credentials::store(&credential_key, &secret) {
+        if let Err(error) = nats_manager::credentials::store(&credential_key, &secret) {
             self.status = format!("Could not save credentials to system keychain: {error}");
             return;
         }
@@ -204,7 +215,7 @@ impl NatsManagerApp {
                 self.status = "Credentials imported into system keychain".to_owned();
             }
             Err(error) => {
-                let _ = crate::credentials::delete(&credential_key);
+                let _ = nats_manager::credentials::delete(&credential_key);
                 self.status = format!("Could not save imported profile: {error}");
             }
         }
@@ -250,7 +261,7 @@ impl NatsManagerApp {
         let sender = self.event_sender.clone();
         self.runtime.spawn(async move {
             let _ = sender.send(UiEvent::Streams(
-                crate::jetstream::list_streams(client).await,
+                nats_manager::jetstream::list_streams(client).await,
             ));
         });
     }
@@ -263,7 +274,7 @@ impl NatsManagerApp {
         };
         let sender = self.event_sender.clone();
         self.runtime.spawn(async move {
-            let result = crate::jetstream::list_consumers(client, stream_name).await;
+            let result = nats_manager::jetstream::list_consumers(client, stream_name).await;
             let _ = sender.send(UiEvent::Consumers(result));
         });
     }
@@ -276,6 +287,16 @@ impl NatsManagerApp {
         self.runtime.spawn(async move {
             let result = operation.await.map(|()| "Operation completed".to_owned());
             let _ = sender.send(UiEvent::Operation(result));
+        });
+    }
+
+    fn run_reported_operation<F>(&mut self, operation: F)
+    where
+        F: std::future::Future<Output = Result<String, String>> + Send + 'static,
+    {
+        let sender = self.event_sender.clone();
+        self.runtime.spawn(async move {
+            let _ = sender.send(UiEvent::Operation(operation.await));
         });
     }
 
@@ -294,7 +315,7 @@ impl NatsManagerApp {
         self.jetstream_message = format!("Creating stream {name}…");
         let sender = self.event_sender.clone();
         self.runtime.spawn(async move {
-            let result = crate::jetstream::create_stream(client, name, subject)
+            let result = nats_manager::jetstream::create_stream(client, name, subject)
                 .await
                 .map(|()| "Stream created".to_owned());
             let _ = sender.send(UiEvent::Operation(result));
@@ -306,13 +327,13 @@ impl NatsManagerApp {
         else {
             return;
         };
-        if self.resource_name_confirmation != name {
+        if !nats_manager::safety::confirms_resource_name(&name, &self.resource_name_confirmation) {
             self.jetstream_message = "Type the exact stream name to confirm deletion".to_owned();
             return;
         }
         self.resource_name_confirmation.clear();
         self.jetstream_message = format!("Deleting stream {name}…");
-        self.run_operation(crate::jetstream::delete_stream(client, name));
+        self.run_operation(nats_manager::jetstream::delete_stream(client, name));
     }
 
     fn create_consumer(&mut self) {
@@ -327,7 +348,7 @@ impl NatsManagerApp {
             return;
         }
         self.jetstream_message = format!("Creating consumer {name}…");
-        self.run_operation(crate::jetstream::create_pull_consumer(
+        self.run_operation(nats_manager::jetstream::create_pull_consumer(
             client,
             stream_name,
             name,
@@ -342,17 +363,96 @@ impl NatsManagerApp {
         ) else {
             return;
         };
-        if self.resource_name_confirmation != consumer_name {
+        if !nats_manager::safety::confirms_resource_name(
+            &consumer_name,
+            &self.resource_name_confirmation,
+        ) {
             self.jetstream_message = "Type the exact consumer name to confirm deletion".to_owned();
             return;
         }
         self.resource_name_confirmation.clear();
         self.jetstream_message = format!("Deleting consumer {consumer_name}…");
-        self.run_operation(crate::jetstream::delete_consumer(
+        self.run_operation(nats_manager::jetstream::delete_consumer(
             client,
             stream_name,
             consumer_name,
         ));
+    }
+
+    fn inspect_recent_messages(&mut self) {
+        let (Some(client), Some(stream_name)) =
+            (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        let sender = self.event_sender.clone();
+        self.jetstream_message = format!("Loading recent messages from {stream_name}…");
+        self.runtime.spawn(async move {
+            let result =
+                nats_manager::jetstream::inspect_recent_messages(client, stream_name, 20).await;
+            let _ = sender.send(UiEvent::Messages(result));
+        });
+    }
+
+    fn publish_message(&mut self) {
+        let Some(client) = self.active_client.clone() else {
+            return;
+        };
+        let subject = self.publish_subject.trim().to_owned();
+        if subject.is_empty() {
+            self.jetstream_message = "Message subject is required".to_owned();
+            return;
+        }
+        let payload = self.publish_payload.as_bytes().to_vec();
+        let jetstream = self.publish_via_jetstream
+            && matches!(
+                &self.jetstream_status,
+                Some(JetStreamStatus::Enabled { .. })
+            );
+        let sender = self.event_sender.clone();
+        self.jetstream_message = format!("Publishing to {subject}…");
+        self.runtime.spawn(async move {
+            let result =
+                nats_manager::jetstream::publish(client, subject, payload, jetstream).await;
+            let _ = sender.send(UiEvent::Operation(result));
+        });
+        self.publish_payload.clear();
+    }
+
+    fn replay_selected_message(&mut self) {
+        let (Some(client), Some(sequence)) = (self.active_client.clone(), self.selected_message)
+        else {
+            return;
+        };
+        let Some(message) = self
+            .messages
+            .iter()
+            .find(|message| message.sequence == sequence)
+        else {
+            return;
+        };
+        self.run_reported_operation(nats_manager::jetstream::replay_message(
+            client,
+            message.subject.clone(),
+            message.payload.clone(),
+        ));
+    }
+
+    fn purge_selected_stream(&mut self) {
+        let (Some(client), Some(stream_name)) =
+            (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        if !nats_manager::safety::confirms_resource_name(
+            &stream_name,
+            &self.resource_name_confirmation,
+        ) {
+            self.jetstream_message = "Type the exact stream name to confirm purge".to_owned();
+            return;
+        }
+        self.resource_name_confirmation.clear();
+        self.run_reported_operation(nats_manager::jetstream::purge_stream(client, stream_name));
     }
 }
 
@@ -374,7 +474,10 @@ impl eframe::App for NatsManagerApp {
                     self.status = format!("Connected to {target} (server {})", info.version);
                     self.active_client = Some(client);
                     self.jetstream_status = Some(jetstream_status);
-                    if matches!(&self.jetstream_status, Some(JetStreamStatus::Enabled)) {
+                    if matches!(
+                        &self.jetstream_status,
+                        Some(JetStreamStatus::Enabled { .. })
+                    ) {
                         self.refresh_streams();
                     }
                 }
@@ -407,6 +510,15 @@ impl eframe::App for NatsManagerApp {
                 }
                 UiEvent::Consumers(Err(error)) => {
                     self.jetstream_message = format!("Could not list consumers: {error}");
+                }
+                UiEvent::Messages(Ok(messages)) => {
+                    self.messages = messages;
+                    self.selected_message = self.messages.last().map(|message| message.sequence);
+                    self.jetstream_message =
+                        format!("Loaded {} recent message(s)", self.messages.len());
+                }
+                UiEvent::Messages(Err(error)) => {
+                    self.jetstream_message = format!("Could not inspect messages: {error}");
                 }
                 UiEvent::Operation(Ok(message)) => {
                     self.jetstream_message = message;
@@ -475,8 +587,17 @@ impl eframe::App for NatsManagerApp {
         ui.label(&self.status);
         if let Some(status) = &self.jetstream_status {
             match status {
-                JetStreamStatus::Enabled => {
-                    ui.label("JetStream: enabled");
+                JetStreamStatus::Enabled {
+                    streams,
+                    consumers,
+                    memory_bytes,
+                    storage_bytes,
+                    domain,
+                } => {
+                    ui.label(format!(
+                        "JetStream enabled · {streams} stream(s) · {consumers} consumer(s) · memory {memory_bytes} B · storage {storage_bytes} B{}",
+                        domain.as_ref().map(|value| format!(" · domain {value}")).unwrap_or_default()
+                    ));
                 }
                 JetStreamStatus::Unavailable(reason) => {
                     ui.label(format!("JetStream: unavailable ({reason})"));
@@ -488,7 +609,10 @@ impl eframe::App for NatsManagerApp {
             ui.weak("Cluster details will appear after connecting.");
         }
 
-        if matches!(&self.jetstream_status, Some(JetStreamStatus::Enabled)) {
+        if matches!(
+            &self.jetstream_status,
+            Some(JetStreamStatus::Enabled { .. })
+        ) {
             ui.add_space(16.0);
             ui.separator();
             ui.heading("JetStream");
@@ -534,7 +658,13 @@ impl eframe::App for NatsManagerApp {
                     if ui.button("Delete stream").clicked() {
                         self.delete_selected_stream();
                     }
+                    if ui.button("Purge messages").clicked() {
+                        self.purge_selected_stream();
+                    }
                 });
+                if ui.button("Inspect recent messages").clicked() {
+                    self.inspect_recent_messages();
+                }
 
                 ui.separator();
                 ui.heading("Consumers");
@@ -564,8 +694,47 @@ impl eframe::App for NatsManagerApp {
                         ui.text_edit_singleline(&mut self.resource_name_confirmation);
                     });
                 }
+
+                ui.separator();
+                ui.heading("Recent messages");
+                for message in self.messages.clone() {
+                    let preview = String::from_utf8_lossy(&message.payload);
+                    let preview = preview.chars().take(160).collect::<String>();
+                    ui.selectable_value(
+                        &mut self.selected_message,
+                        Some(message.sequence),
+                        format!("#{} {} — {}", message.sequence, message.subject, preview),
+                    );
+                }
+                if self.selected_message.is_some() && ui.button("Replay selected message").clicked()
+                {
+                    self.replay_selected_message();
+                }
             }
             ui.label(&self.jetstream_message);
+        }
+
+        if self.active_client.is_some() {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.heading("Publish message");
+            if matches!(
+                &self.jetstream_status,
+                Some(JetStreamStatus::Enabled { .. })
+            ) {
+                ui.checkbox(
+                    &mut self.publish_via_jetstream,
+                    "Publish through JetStream (requires a matching stream)",
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.label("Subject");
+                ui.text_edit_singleline(&mut self.publish_subject);
+                if ui.button("Publish").clicked() {
+                    self.publish_message();
+                }
+            });
+            ui.text_edit_multiline(&mut self.publish_payload);
         }
 
         ui.ctx()

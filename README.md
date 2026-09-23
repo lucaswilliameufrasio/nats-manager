@@ -19,4 +19,6 @@ This project uses Cargo for Rust dependencies and tooling. Start the desktop app
 cargo run
 ```
 
-The initial implementation provides the desktop shell, an asynchronous NATS connectivity check, and an operating-system credential-store abstraction.
+The app currently includes connection profiles, secure credential storage/import, authenticated connections, JetStream detection, stream and durable-consumer creation/deletion, message publishing/inspection/replay, and exact-name confirmation for destructive JetStream actions.
+
+NATS integration tests can run against local servers by setting `NATS_URL` to a JetStream-enabled server and `NATS_NO_JS_URL` to a server without JetStream before running `cargo test --test nats_integration`. Without those variables the integration tests return without connecting.
