@@ -1,5 +1,6 @@
 use async_nats::{Client, ConnectOptions};
 use std::io::Cursor;
+use std::sync::Arc;
 
 use crate::{
     credentials,
@@ -33,6 +34,36 @@ pub async fn connect_profile(
             })?;
             ConnectOptions::with_user_and_password(username.clone(), password)
         }
+        Authentication::Token { credential_key } => {
+            let token = credentials::load(credential_key)
+                .map_err(|error| format!("could not read token from system keychain: {error}"))?;
+            ConnectOptions::with_token(token)
+        }
+        Authentication::NKey { credential_key } => {
+            let seed = credentials::load(credential_key).map_err(|error| {
+                format!("could not read NKey seed from system keychain: {error}")
+            })?;
+            ConnectOptions::with_nkey(seed)
+        }
+        Authentication::Jwt {
+            jwt_credential_key,
+            seed_credential_key,
+        } => {
+            let jwt = credentials::load(jwt_credential_key).map_err(|error| {
+                format!("could not read user JWT from system keychain: {error}")
+            })?;
+            let seed = credentials::load(seed_credential_key).map_err(|error| {
+                format!("could not read user seed from system keychain: {error}")
+            })?;
+            let key_pair = Arc::new(
+                nkeys::KeyPair::from_seed(&seed)
+                    .map_err(|error| format!("invalid NKey seed: {error}"))?,
+            );
+            ConnectOptions::with_jwt(jwt, move |nonce| {
+                let key_pair = Arc::clone(&key_pair);
+                async move { key_pair.sign(&nonce).map_err(async_nats::AuthError::new) }
+            })
+        }
         Authentication::CredentialsFile { credential_key } => {
             let contents = credentials::load(credential_key).map_err(|error| {
                 format!("could not read credentials from system keychain: {error}")
@@ -42,9 +73,14 @@ pub async fn connect_profile(
         }
     };
     let options = if let Some(tls) = &profile.tls {
-        options
+        let options = options
             .tls_client_config(build_tls_config(tls)?)
-            .require_tls(true)
+            .require_tls(true);
+        if tls.tls_first {
+            options.tls_first()
+        } else {
+            options
+        }
     } else {
         options
     };
@@ -137,6 +173,7 @@ mod tests {
             ca_certificate_key: None,
             client_certificate_key: Some("cert-entry".to_owned()),
             client_private_key_key: None,
+            tls_first: false,
         };
 
         let error = build_tls_config(&tls).expect_err("partial mTLS identity must be rejected");

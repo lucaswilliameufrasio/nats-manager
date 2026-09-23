@@ -256,6 +256,7 @@ impl NatsManagerApp {
             ca_certificate_key: self.tls_ca_certificate_key.clone(),
             client_certificate_key: self.tls_client_certificate_key.clone(),
             client_private_key_key: self.tls_client_private_key_key.clone(),
+            tls_first: false,
         })
     }
 
@@ -299,6 +300,42 @@ impl NatsManagerApp {
         *key_slot = Some(key);
         self.status =
             "TLS material stored in system keychain; save the profile to keep it".to_owned();
+    }
+
+    fn import_nats_context(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import NATS CLI context")
+            .add_filter("NATS context JSON", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(store) = &self.profile_store else {
+            self.status = "Could not locate the application config directory".to_owned();
+            return;
+        };
+        let imported = match nats_manager::context_import::import_context(&path) {
+            Ok(imported) => imported,
+            Err(error) => {
+                self.status = format!("Could not import NATS context: {error}");
+                return;
+            }
+        };
+        let mut profiles = self.profiles.clone();
+        profiles.push(imported.profile);
+        match store.save(&profiles) {
+            Ok(()) => {
+                self.profiles = profiles;
+                self.status =
+                    "NATS CLI context imported; secrets stored in system keychain".to_owned();
+            }
+            Err(error) => {
+                for key in imported.credential_keys {
+                    let _ = nats_manager::credentials::delete(&key);
+                }
+                self.status = format!("Could not save imported context: {error}");
+            }
+        }
     }
 
     fn connect(&mut self) {
@@ -743,6 +780,9 @@ impl eframe::App for NatsManagerApp {
             .clicked()
         {
             self.import_credentials_file();
+        }
+        if ui.button("Import NATS CLI context JSON").clicked() {
+            self.import_nats_context();
         }
         ui.separator();
         ui.label("TLS / mTLS (imported PEM files are stored in the system keychain)");

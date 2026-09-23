@@ -18,6 +18,8 @@ pub struct TlsConfig {
     pub ca_certificate_key: Option<String>,
     pub client_certificate_key: Option<String>,
     pub client_private_key_key: Option<String>,
+    #[serde(default)]
+    pub tls_first: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -27,6 +29,16 @@ pub enum Authentication {
     UserPassword {
         username: String,
         credential_key: String,
+    },
+    Token {
+        credential_key: String,
+    },
+    NKey {
+        credential_key: String,
+    },
+    Jwt {
+        jwt_credential_key: String,
+        seed_credential_key: String,
     },
     CredentialsFile {
         credential_key: String,
