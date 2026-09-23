@@ -5,6 +5,7 @@ pub struct StoredMessage {
     pub sequence: u64,
     pub subject: String,
     pub payload: Vec<u8>,
+    pub headers: async_nats::HeaderMap,
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +254,7 @@ pub async fn inspect_recent_messages(
                 sequence: message.sequence,
                 subject: message.subject.to_string(),
                 payload: message.payload.to_vec(),
+                headers: message.headers,
             });
         }
     }
@@ -264,12 +266,13 @@ pub async fn publish(
     client: async_nats::Client,
     subject: String,
     payload: Vec<u8>,
+    headers: async_nats::HeaderMap,
     jetstream: bool,
     api_prefix: Option<String>,
 ) -> Result<String, String> {
     if jetstream {
         let ack = jetstream_context(client, api_prefix)
-            .publish(subject, payload.into())
+            .publish_with_headers(subject, headers, payload.into())
             .await
             .map_err(|error| error.to_string())?
             .await
@@ -277,7 +280,7 @@ pub async fn publish(
         Ok(format!("Published and stored as sequence {}", ack.sequence))
     } else {
         client
-            .publish(subject, payload.into())
+            .publish_with_headers(subject, headers, payload.into())
             .await
             .map_err(|error| error.to_string())?;
         Ok("Message published".to_owned())
@@ -301,10 +304,11 @@ pub async fn replay_message(
     client: async_nats::Client,
     subject: String,
     payload: Vec<u8>,
+    headers: async_nats::HeaderMap,
     api_prefix: Option<String>,
 ) -> Result<String, String> {
     let ack = jetstream_context(client, api_prefix)
-        .publish(subject, payload.into())
+        .publish_with_headers(subject, headers, payload.into())
         .await
         .map_err(|error| error.to_string())?
         .await

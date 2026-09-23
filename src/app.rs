@@ -635,9 +635,15 @@ impl NatsManagerApp {
         let api_prefix = self.jetstream_api_prefix.clone();
         self.jetstream_message = format!("Publishing to {subject}…");
         self.runtime.spawn(async move {
-            let result =
-                nats_manager::jetstream::publish(client, subject, payload, jetstream, api_prefix)
-                    .await;
+            let result = nats_manager::jetstream::publish(
+                client,
+                subject,
+                payload,
+                async_nats::HeaderMap::new(),
+                jetstream,
+                api_prefix,
+            )
+            .await;
             let _ = sender.send(UiEvent::Operation(result));
         });
         self.publish_payload.clear();
@@ -659,6 +665,7 @@ impl NatsManagerApp {
             client,
             message.subject.clone(),
             message.payload.clone(),
+            message.headers.clone(),
             self.jetstream_api_prefix.clone(),
         ));
     }
@@ -1035,10 +1042,36 @@ impl eframe::App for NatsManagerApp {
                 for message in self.messages.clone() {
                     let preview = String::from_utf8_lossy(&message.payload);
                     let preview = preview.chars().take(160).collect::<String>();
+                    let headers = message
+                        .headers
+                        .iter()
+                        .map(|(name, values)| {
+                            format!(
+                                "{}: {}",
+                                name,
+                                values
+                                    .iter()
+                                    .map(|value| value.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
                     ui.selectable_value(
                         &mut self.selected_message,
                         Some(message.sequence),
-                        format!("#{} {} — {}", message.sequence, message.subject, preview),
+                        format!(
+                            "#{} {} — {}{}",
+                            message.sequence,
+                            message.subject,
+                            preview,
+                            if headers.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {headers}")
+                            }
+                        ),
                     );
                 }
                 if self.selected_message.is_some() && ui.button("Replay selected message").clicked()

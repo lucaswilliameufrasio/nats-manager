@@ -92,10 +92,13 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
         vec![updated_subject.clone()]
     );
 
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert("X-Trace-Id", "trace-test-123");
     jetstream::publish(
         client.clone(),
         updated_subject.clone(),
         b"first payload".to_vec(),
+        headers,
         true,
         None,
     )
@@ -109,21 +112,34 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
         .expect("published message should be present");
     assert_eq!(message.subject, updated_subject);
     assert_eq!(message.payload, b"first payload");
+    assert_eq!(
+        message.headers.get("X-Trace-Id").unwrap().as_str(),
+        "trace-test-123"
+    );
 
     jetstream::replay_message(
         client.clone(),
         message.subject.clone(),
         message.payload.clone(),
+        message.headers.clone(),
         None,
     )
     .await
     .expect("message replay should be acknowledged");
-    assert_eq!(
+    let replayed_messages =
         jetstream::inspect_recent_messages(client.clone(), stream.clone(), 20, None)
             .await
-            .expect("replayed message should be inspectable")
-            .len(),
-        2
+            .expect("replayed message should be inspectable");
+    assert_eq!(replayed_messages.len(), 2);
+    assert_eq!(
+        replayed_messages
+            .last()
+            .unwrap()
+            .headers
+            .get("X-Trace-Id")
+            .unwrap()
+            .as_str(),
+        "trace-test-123"
     );
 
     jetstream::purge_stream(client.clone(), stream.clone(), None)
@@ -159,9 +175,16 @@ async fn connection_reports_when_jetstream_is_unavailable() {
         .subscribe(subject.clone())
         .await
         .expect("subscription should be created");
-    jetstream::publish(client, subject, b"core payload".to_vec(), false, None)
-        .await
-        .expect("core NATS publish should succeed without JetStream");
+    jetstream::publish(
+        client,
+        subject,
+        b"core payload".to_vec(),
+        async_nats::HeaderMap::new(),
+        false,
+        None,
+    )
+    .await
+    .expect("core NATS publish should succeed without JetStream");
     let message = subscriber
         .next()
         .await
