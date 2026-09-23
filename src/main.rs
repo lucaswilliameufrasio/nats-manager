@@ -1,6 +1,7 @@
 mod app;
 mod connection;
 pub mod credentials;
+mod jetstream;
 mod profile;
 
 fn main() -> eframe::Result {

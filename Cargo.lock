@@ -2067,6 +2067,7 @@ dependencies = [
  "async-nats",
  "directories",
  "eframe",
+ "futures-util",
  "keyring",
  "rfd",
  "serde",

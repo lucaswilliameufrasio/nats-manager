@@ -7,14 +7,19 @@ use uuid::Uuid;
 use crate::connection::{self, JetStreamStatus};
 use crate::profile::{Authentication, ConnectionProfile, ProfileStore};
 
-type ConnectionResult = Result<(async_nats::Client, JetStreamStatus, String), String>;
+enum UiEvent {
+    Connected(Result<(async_nats::Client, JetStreamStatus, String), String>),
+    Streams(Result<Vec<String>, String>),
+    Consumers(Result<Vec<String>, String>),
+    Operation(Result<String, String>),
+}
 
 pub struct NatsManagerApp {
     runtime: Runtime,
     server_url: String,
     status: String,
-    connection_result: Option<Receiver<ConnectionResult>>,
-    connection_sender: Sender<ConnectionResult>,
+    event_receiver: Receiver<UiEvent>,
+    event_sender: Sender<UiEvent>,
     active_client: Option<async_nats::Client>,
     jetstream_status: Option<JetStreamStatus>,
     profile_store: Option<ProfileStore>,
@@ -23,11 +28,20 @@ pub struct NatsManagerApp {
     username: String,
     password: String,
     use_password_auth: bool,
+    streams: Vec<String>,
+    selected_stream: Option<String>,
+    consumers: Vec<String>,
+    selected_consumer: Option<String>,
+    resource_name_confirmation: String,
+    new_stream_name: String,
+    new_stream_subject: String,
+    new_consumer_name: String,
+    jetstream_message: String,
 }
 
 impl NatsManagerApp {
     pub fn new(runtime: Runtime) -> Self {
-        let (connection_sender, connection_result) = mpsc::channel();
+        let (event_sender, event_receiver) = mpsc::channel();
         let profile_store = ProfileStore::default_location().ok();
         let profiles = profile_store
             .as_ref()
@@ -38,8 +52,8 @@ impl NatsManagerApp {
             runtime,
             server_url: "nats://127.0.0.1:4222".to_owned(),
             status: "Not connected".to_owned(),
-            connection_result: Some(connection_result),
-            connection_sender,
+            event_receiver,
+            event_sender,
             active_client: None,
             jetstream_status: None,
             profile_store,
@@ -48,6 +62,15 @@ impl NatsManagerApp {
             username: String::new(),
             password: String::new(),
             use_password_auth: false,
+            streams: Vec::new(),
+            selected_stream: None,
+            consumers: Vec::new(),
+            selected_consumer: None,
+            resource_name_confirmation: String::new(),
+            new_stream_name: String::new(),
+            new_stream_subject: String::new(),
+            new_consumer_name: String::new(),
+            jetstream_message: String::new(),
         }
     }
 
@@ -212,27 +235,185 @@ impl NatsManagerApp {
     fn spawn_connection(&mut self, profile: ConnectionProfile) {
         self.active_client = None;
         self.jetstream_status = None;
-        let sender = self.connection_sender.clone();
+        let sender = self.event_sender.clone();
         self.runtime.spawn(async move {
-            let _ = sender.send(connection::connect_profile(profile).await);
+            let _ = sender.send(UiEvent::Connected(
+                connection::connect_profile(profile).await,
+            ));
         });
+    }
+
+    fn refresh_streams(&mut self) {
+        let Some(client) = self.active_client.clone() else {
+            return;
+        };
+        let sender = self.event_sender.clone();
+        self.runtime.spawn(async move {
+            let _ = sender.send(UiEvent::Streams(
+                crate::jetstream::list_streams(client).await,
+            ));
+        });
+    }
+
+    fn refresh_consumers(&mut self) {
+        let (Some(client), Some(stream_name)) =
+            (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        let sender = self.event_sender.clone();
+        self.runtime.spawn(async move {
+            let result = crate::jetstream::list_consumers(client, stream_name).await;
+            let _ = sender.send(UiEvent::Consumers(result));
+        });
+    }
+
+    fn run_operation<F>(&mut self, operation: F)
+    where
+        F: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let sender = self.event_sender.clone();
+        self.runtime.spawn(async move {
+            let result = operation.await.map(|()| "Operation completed".to_owned());
+            let _ = sender.send(UiEvent::Operation(result));
+        });
+    }
+
+    fn create_stream(&mut self) {
+        let (Some(client), name, subject) = (
+            self.active_client.clone(),
+            self.new_stream_name.trim().to_owned(),
+            self.new_stream_subject.trim().to_owned(),
+        ) else {
+            return;
+        };
+        if name.is_empty() || subject.is_empty() {
+            self.jetstream_message = "Stream name and subject are required".to_owned();
+            return;
+        }
+        self.jetstream_message = format!("Creating stream {name}…");
+        let sender = self.event_sender.clone();
+        self.runtime.spawn(async move {
+            let result = crate::jetstream::create_stream(client, name, subject)
+                .await
+                .map(|()| "Stream created".to_owned());
+            let _ = sender.send(UiEvent::Operation(result));
+        });
+    }
+
+    fn delete_selected_stream(&mut self) {
+        let (Some(client), Some(name)) = (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        if self.resource_name_confirmation != name {
+            self.jetstream_message = "Type the exact stream name to confirm deletion".to_owned();
+            return;
+        }
+        self.resource_name_confirmation.clear();
+        self.jetstream_message = format!("Deleting stream {name}…");
+        self.run_operation(crate::jetstream::delete_stream(client, name));
+    }
+
+    fn create_consumer(&mut self) {
+        let (Some(client), Some(stream_name)) =
+            (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        let name = self.new_consumer_name.trim().to_owned();
+        if name.is_empty() {
+            self.jetstream_message = "Consumer name is required".to_owned();
+            return;
+        }
+        self.jetstream_message = format!("Creating consumer {name}…");
+        self.run_operation(crate::jetstream::create_pull_consumer(
+            client,
+            stream_name,
+            name,
+        ));
+    }
+
+    fn delete_selected_consumer(&mut self) {
+        let (Some(client), Some(stream_name), Some(consumer_name)) = (
+            self.active_client.clone(),
+            self.selected_stream.clone(),
+            self.selected_consumer.clone(),
+        ) else {
+            return;
+        };
+        if self.resource_name_confirmation != consumer_name {
+            self.jetstream_message = "Type the exact consumer name to confirm deletion".to_owned();
+            return;
+        }
+        self.resource_name_confirmation.clear();
+        self.jetstream_message = format!("Deleting consumer {consumer_name}…");
+        self.run_operation(crate::jetstream::delete_consumer(
+            client,
+            stream_name,
+            consumer_name,
+        ));
     }
 }
 
 impl eframe::App for NatsManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if let Some(receiver) = &self.connection_result {
-            match receiver.try_recv() {
-                Ok(Ok((client, jetstream_status, target))) => {
+        for _ in 0..16 {
+            let event = match self.event_receiver.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.status = "Background task channel stopped unexpectedly".to_owned();
+                    break;
+                }
+            };
+
+            match event {
+                UiEvent::Connected(Ok((client, jetstream_status, target))) => {
                     let info = client.server_info();
                     self.status = format!("Connected to {target} (server {})", info.version);
                     self.active_client = Some(client);
                     self.jetstream_status = Some(jetstream_status);
+                    if matches!(&self.jetstream_status, Some(JetStreamStatus::Enabled)) {
+                        self.refresh_streams();
+                    }
                 }
-                Ok(Err(error)) => self.status = format!("Connection failed: {error}"),
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.status = "Connection task stopped unexpectedly".to_owned();
+                UiEvent::Connected(Err(error)) => {
+                    self.status = format!("Connection failed: {error}");
+                }
+                UiEvent::Streams(Ok(streams)) => {
+                    self.streams = streams;
+                    if !self
+                        .selected_stream
+                        .as_ref()
+                        .is_some_and(|selected| self.streams.contains(selected))
+                    {
+                        self.selected_stream = self.streams.first().cloned();
+                    }
+                    self.refresh_consumers();
+                }
+                UiEvent::Streams(Err(error)) => {
+                    self.jetstream_message = format!("Could not list streams: {error}");
+                }
+                UiEvent::Consumers(Ok(consumers)) => {
+                    self.consumers = consumers;
+                    if !self
+                        .selected_consumer
+                        .as_ref()
+                        .is_some_and(|selected| self.consumers.contains(selected))
+                    {
+                        self.selected_consumer = self.consumers.first().cloned();
+                    }
+                }
+                UiEvent::Consumers(Err(error)) => {
+                    self.jetstream_message = format!("Could not list consumers: {error}");
+                }
+                UiEvent::Operation(Ok(message)) => {
+                    self.jetstream_message = message;
+                    self.refresh_streams();
+                }
+                UiEvent::Operation(Err(error)) => {
+                    self.jetstream_message = format!("Operation failed: {error}");
                 }
             }
         }
@@ -305,6 +486,86 @@ impl eframe::App for NatsManagerApp {
         ui.add_space(16.0);
         if self.active_client.is_none() {
             ui.weak("Cluster details will appear after connecting.");
+        }
+
+        if matches!(&self.jetstream_status, Some(JetStreamStatus::Enabled)) {
+            ui.add_space(16.0);
+            ui.separator();
+            ui.heading("JetStream");
+            ui.horizontal(|ui| {
+                if ui.button("Refresh streams").clicked() {
+                    self.refresh_streams();
+                }
+                ui.label(format!("{} stream(s)", self.streams.len()));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Stream name");
+                ui.text_edit_singleline(&mut self.new_stream_name);
+                ui.label("Subject");
+                ui.text_edit_singleline(&mut self.new_stream_subject);
+                if ui.button("Create stream").clicked() {
+                    self.create_stream();
+                }
+            });
+
+            let mut selected_stream_changed = false;
+            ui.horizontal_wrapped(|ui| {
+                for stream in self.streams.clone() {
+                    if ui
+                        .selectable_label(self.selected_stream.as_ref() == Some(&stream), &stream)
+                        .clicked()
+                    {
+                        self.selected_stream = Some(stream);
+                        self.selected_consumer = None;
+                        self.consumers.clear();
+                        selected_stream_changed = true;
+                    }
+                }
+            });
+            if selected_stream_changed {
+                self.refresh_consumers();
+            }
+
+            if let Some(stream) = self.selected_stream.clone() {
+                ui.label(format!("Selected stream: {stream}"));
+                ui.horizontal(|ui| {
+                    ui.label("Type stream name to delete");
+                    ui.text_edit_singleline(&mut self.resource_name_confirmation);
+                    if ui.button("Delete stream").clicked() {
+                        self.delete_selected_stream();
+                    }
+                });
+
+                ui.separator();
+                ui.heading("Consumers");
+                ui.horizontal(|ui| {
+                    ui.label("New durable pull consumer");
+                    ui.text_edit_singleline(&mut self.new_consumer_name);
+                    if ui.button("Create consumer").clicked() {
+                        self.create_consumer();
+                    }
+                });
+                for consumer in self.consumers.clone() {
+                    ui.selectable_value(
+                        &mut self.selected_consumer,
+                        Some(consumer.clone()),
+                        consumer,
+                    );
+                }
+                if let Some(consumer) = self.selected_consumer.clone() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Selected consumer: {consumer}"));
+                        if ui.button("Delete consumer").clicked() {
+                            self.delete_selected_consumer();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Type consumer name to confirm");
+                        ui.text_edit_singleline(&mut self.resource_name_confirmation);
+                    });
+                }
+            }
+            ui.label(&self.jetstream_message);
         }
 
         ui.ctx()
