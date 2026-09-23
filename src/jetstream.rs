@@ -7,6 +7,20 @@ pub struct StoredMessage {
     pub payload: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub struct StreamDetails {
+    pub subjects: Vec<String>,
+    pub messages: u64,
+    pub bytes: u64,
+    pub consumers: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConsumerDetails {
+    pub ack_wait_seconds: u64,
+    pub max_deliver: i64,
+}
+
 pub async fn list_streams(client: async_nats::Client) -> Result<Vec<String>, String> {
     let context = async_nats::jetstream::new(client);
     let mut names = context.stream_names();
@@ -55,6 +69,42 @@ pub async fn create_stream(
         .map_err(|error| error.to_string())
 }
 
+pub async fn describe_stream(
+    client: async_nats::Client,
+    name: String,
+) -> Result<StreamDetails, String> {
+    let stream = async_nats::jetstream::new(client)
+        .get_stream(name)
+        .await
+        .map_err(|error| error.to_string())?;
+    let info = stream.get_info().await.map_err(|error| error.to_string())?;
+    Ok(StreamDetails {
+        subjects: info.config.subjects,
+        messages: info.state.messages,
+        bytes: info.state.bytes,
+        consumers: info.state.consumer_count,
+    })
+}
+
+pub async fn update_stream_subject(
+    client: async_nats::Client,
+    name: String,
+    subject: String,
+) -> Result<(), String> {
+    let context = async_nats::jetstream::new(client);
+    let stream = context
+        .get_stream(name)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut info = stream.get_info().await.map_err(|error| error.to_string())?;
+    info.config.subjects = vec![subject];
+    context
+        .update_stream(info.config)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 pub async fn delete_stream(client: async_nats::Client, name: String) -> Result<(), String> {
     async_nats::jetstream::new(client)
         .delete_stream(name)
@@ -81,6 +131,52 @@ pub async fn create_pull_consumer(
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+pub async fn update_consumer_limits(
+    client: async_nats::Client,
+    stream_name: String,
+    consumer_name: String,
+    max_deliver: i64,
+    ack_wait_seconds: u64,
+) -> Result<(), String> {
+    if max_deliver < 0 {
+        return Err("maximum deliveries cannot be negative".to_owned());
+    }
+    let stream = async_nats::jetstream::new(client)
+        .get_stream(stream_name)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut info = stream
+        .consumer_info(&consumer_name)
+        .await
+        .map_err(|error| error.to_string())?;
+    info.config.max_deliver = max_deliver;
+    info.config.ack_wait = std::time::Duration::from_secs(ack_wait_seconds);
+    stream
+        .update_consumer(info.config)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+pub async fn describe_consumer(
+    client: async_nats::Client,
+    stream_name: String,
+    consumer_name: String,
+) -> Result<ConsumerDetails, String> {
+    let stream = async_nats::jetstream::new(client)
+        .get_stream(stream_name)
+        .await
+        .map_err(|error| error.to_string())?;
+    let info = stream
+        .consumer_info(&consumer_name)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(ConsumerDetails {
+        ack_wait_seconds: info.config.ack_wait.as_secs(),
+        max_deliver: info.config.max_deliver,
+    })
 }
 
 pub async fn delete_consumer(

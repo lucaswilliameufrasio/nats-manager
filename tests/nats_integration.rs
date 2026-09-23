@@ -33,6 +33,10 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
     jetstream::create_stream(client.clone(), stream.clone(), subject.clone())
         .await
         .expect("stream should be created");
+    let details = jetstream::describe_stream(client.clone(), stream.clone())
+        .await
+        .expect("stream details should load");
+    assert_eq!(details.subjects, vec![subject.clone()]);
     assert!(
         jetstream::list_streams(client.clone())
             .await
@@ -43,6 +47,18 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
     jetstream::create_pull_consumer(client.clone(), stream.clone(), consumer.clone())
         .await
         .expect("consumer should be created");
+    jetstream::update_consumer_limits(client.clone(), stream.clone(), consumer.clone(), 3, 15)
+        .await
+        .expect("consumer limits should be updated");
+    let consumer_info = async_nats::jetstream::new(client.clone())
+        .get_stream(stream.clone())
+        .await
+        .expect("stream should load")
+        .consumer_info(&consumer)
+        .await
+        .expect("consumer info should load");
+    assert_eq!(consumer_info.config.max_deliver, 3);
+    assert_eq!(consumer_info.config.ack_wait.as_secs(), 15);
     assert!(
         jetstream::list_consumers(client.clone(), stream.clone())
             .await
@@ -50,9 +66,21 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
             .contains(&consumer)
     );
 
+    let updated_subject = format!("{subject}.updated");
+    jetstream::update_stream_subject(client.clone(), stream.clone(), updated_subject.clone())
+        .await
+        .expect("stream subject should be updated");
+    assert_eq!(
+        jetstream::describe_stream(client.clone(), stream.clone())
+            .await
+            .expect("updated stream details should load")
+            .subjects,
+        vec![updated_subject.clone()]
+    );
+
     jetstream::publish(
         client.clone(),
-        subject.clone(),
+        updated_subject.clone(),
         b"first payload".to_vec(),
         true,
     )
@@ -64,7 +92,7 @@ async fn jetstream_stream_consumer_message_and_purge_flow() {
     let message = messages
         .first()
         .expect("published message should be present");
-    assert_eq!(message.subject, subject);
+    assert_eq!(message.subject, updated_subject);
     assert_eq!(message.payload, b"first payload");
 
     jetstream::replay_message(

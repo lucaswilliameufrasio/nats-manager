@@ -10,7 +10,9 @@ use nats_manager::profile::{Authentication, ConnectionProfile, ProfileStore};
 enum UiEvent {
     Connected(Result<(async_nats::Client, JetStreamStatus, String), String>),
     Streams(Result<Vec<String>, String>),
+    StreamDetails(Result<nats_manager::jetstream::StreamDetails, String>),
     Consumers(Result<Vec<String>, String>),
+    ConsumerDetails(Result<nats_manager::jetstream::ConsumerDetails, String>),
     Messages(Result<Vec<nats_manager::jetstream::StoredMessage>, String>),
     Operation(Result<String, String>),
 }
@@ -37,7 +39,10 @@ pub struct NatsManagerApp {
     new_stream_name: String,
     new_stream_subject: String,
     new_consumer_name: String,
+    max_deliver_input: String,
+    ack_wait_input: String,
     jetstream_message: String,
+    stream_details: Option<nats_manager::jetstream::StreamDetails>,
     messages: Vec<nats_manager::jetstream::StoredMessage>,
     selected_message: Option<u64>,
     publish_subject: String,
@@ -76,7 +81,10 @@ impl NatsManagerApp {
             new_stream_name: String::new(),
             new_stream_subject: String::new(),
             new_consumer_name: String::new(),
+            max_deliver_input: String::new(),
+            ack_wait_input: String::new(),
             jetstream_message: String::new(),
+            stream_details: None,
             messages: Vec::new(),
             selected_message: None,
             publish_subject: String::new(),
@@ -279,6 +287,35 @@ impl NatsManagerApp {
         });
     }
 
+    fn refresh_stream_details(&mut self) {
+        let (Some(client), Some(name)) = (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        let sender = self.event_sender.clone();
+        self.runtime.spawn(async move {
+            let result = nats_manager::jetstream::describe_stream(client, name).await;
+            let _ = sender.send(UiEvent::StreamDetails(result));
+        });
+    }
+
+    fn refresh_consumer_details(&mut self) {
+        let (Some(client), Some(stream_name), Some(consumer_name)) = (
+            self.active_client.clone(),
+            self.selected_stream.clone(),
+            self.selected_consumer.clone(),
+        ) else {
+            return;
+        };
+        let sender = self.event_sender.clone();
+        self.runtime.spawn(async move {
+            let result =
+                nats_manager::jetstream::describe_consumer(client, stream_name, consumer_name)
+                    .await;
+            let _ = sender.send(UiEvent::ConsumerDetails(result));
+        });
+    }
+
     fn run_operation<F>(&mut self, operation: F)
     where
         F: std::future::Future<Output = Result<(), String>> + Send + 'static,
@@ -322,6 +359,21 @@ impl NatsManagerApp {
         });
     }
 
+    fn update_selected_stream_subject(&mut self) {
+        let (Some(client), Some(name)) = (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        let subject = self.new_stream_subject.trim().to_owned();
+        if subject.is_empty() {
+            self.jetstream_message = "Stream subject is required".to_owned();
+            return;
+        }
+        self.run_operation(nats_manager::jetstream::update_stream_subject(
+            client, name, subject,
+        ));
+    }
+
     fn delete_selected_stream(&mut self) {
         let (Some(client), Some(name)) = (self.active_client.clone(), self.selected_stream.clone())
         else {
@@ -352,6 +404,37 @@ impl NatsManagerApp {
             client,
             stream_name,
             name,
+        ));
+    }
+
+    fn update_selected_consumer_limits(&mut self) {
+        let (Some(client), Some(stream_name), Some(consumer_name)) = (
+            self.active_client.clone(),
+            self.selected_stream.clone(),
+            self.selected_consumer.clone(),
+        ) else {
+            return;
+        };
+        let max_deliver = match self.max_deliver_input.trim().parse::<i64>() {
+            Ok(value) if value >= 0 => value,
+            _ => {
+                self.jetstream_message = "Max deliveries must be a non-negative integer".to_owned();
+                return;
+            }
+        };
+        let ack_wait_seconds = match self.ack_wait_input.trim().parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => {
+                self.jetstream_message = "Ack wait must be a non-negative integer".to_owned();
+                return;
+            }
+        };
+        self.run_operation(nats_manager::jetstream::update_consumer_limits(
+            client,
+            stream_name,
+            consumer_name,
+            max_deliver,
+            ack_wait_seconds,
         ));
     }
 
@@ -493,12 +576,20 @@ impl eframe::App for NatsManagerApp {
                     {
                         self.selected_stream = self.streams.first().cloned();
                     }
+                    self.refresh_stream_details();
                     self.refresh_consumers();
                 }
                 UiEvent::Streams(Err(error)) => {
                     self.jetstream_message = format!("Could not list streams: {error}");
                 }
+                UiEvent::StreamDetails(Ok(details)) => {
+                    self.stream_details = Some(details);
+                }
+                UiEvent::StreamDetails(Err(error)) => {
+                    self.jetstream_message = format!("Could not load stream details: {error}");
+                }
                 UiEvent::Consumers(Ok(consumers)) => {
+                    let previous = self.selected_consumer.clone();
                     self.consumers = consumers;
                     if !self
                         .selected_consumer
@@ -507,9 +598,19 @@ impl eframe::App for NatsManagerApp {
                     {
                         self.selected_consumer = self.consumers.first().cloned();
                     }
+                    if previous != self.selected_consumer {
+                        self.refresh_consumer_details();
+                    }
                 }
                 UiEvent::Consumers(Err(error)) => {
                     self.jetstream_message = format!("Could not list consumers: {error}");
+                }
+                UiEvent::ConsumerDetails(Ok(details)) => {
+                    self.max_deliver_input = details.max_deliver.to_string();
+                    self.ack_wait_input = details.ack_wait_seconds.to_string();
+                }
+                UiEvent::ConsumerDetails(Err(error)) => {
+                    self.jetstream_message = format!("Could not load consumer details: {error}");
                 }
                 UiEvent::Messages(Ok(messages)) => {
                     self.messages = messages;
@@ -642,16 +743,34 @@ impl eframe::App for NatsManagerApp {
                         self.selected_stream = Some(stream);
                         self.selected_consumer = None;
                         self.consumers.clear();
+                        self.stream_details = None;
                         selected_stream_changed = true;
                     }
                 }
             });
             if selected_stream_changed {
+                self.refresh_stream_details();
                 self.refresh_consumers();
             }
 
             if let Some(stream) = self.selected_stream.clone() {
                 ui.label(format!("Selected stream: {stream}"));
+                if let Some(details) = &self.stream_details {
+                    ui.label(format!(
+                        "Subjects: {} · {} message(s) · {} B · {} consumer(s)",
+                        details.subjects.join(", "),
+                        details.messages,
+                        details.bytes,
+                        details.consumers
+                    ));
+                }
+                ui.horizontal(|ui| {
+                    ui.label("New subject filter");
+                    ui.text_edit_singleline(&mut self.new_stream_subject);
+                    if ui.button("Update stream subject").clicked() {
+                        self.update_selected_stream_subject();
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("Type stream name to delete");
                     ui.text_edit_singleline(&mut self.resource_name_confirmation);
@@ -675,12 +794,21 @@ impl eframe::App for NatsManagerApp {
                         self.create_consumer();
                     }
                 });
+                let mut selected_consumer_changed = false;
                 for consumer in self.consumers.clone() {
-                    ui.selectable_value(
-                        &mut self.selected_consumer,
-                        Some(consumer.clone()),
-                        consumer,
-                    );
+                    if ui
+                        .selectable_label(
+                            self.selected_consumer.as_ref() == Some(&consumer),
+                            &consumer,
+                        )
+                        .clicked()
+                    {
+                        self.selected_consumer = Some(consumer);
+                        selected_consumer_changed = true;
+                    }
+                }
+                if selected_consumer_changed {
+                    self.refresh_consumer_details();
                 }
                 if let Some(consumer) = self.selected_consumer.clone() {
                     ui.horizontal(|ui| {
@@ -692,6 +820,15 @@ impl eframe::App for NatsManagerApp {
                     ui.horizontal(|ui| {
                         ui.label("Type consumer name to confirm");
                         ui.text_edit_singleline(&mut self.resource_name_confirmation);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Max deliveries");
+                        ui.text_edit_singleline(&mut self.max_deliver_input);
+                        ui.label("Ack wait (seconds)");
+                        ui.text_edit_singleline(&mut self.ack_wait_input);
+                        if ui.button("Update consumer limits").clicked() {
+                            self.update_selected_consumer_limits();
+                        }
                     });
                 }
 
