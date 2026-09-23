@@ -9,6 +9,15 @@ pub struct ConnectionProfile {
     pub name: String,
     pub servers: Vec<String>,
     pub authentication: Authentication,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TlsConfig {
+    pub ca_certificate_key: Option<String>,
+    pub client_certificate_key: Option<String>,
+    pub client_private_key_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -36,6 +45,7 @@ impl ConnectionProfile {
             name,
             servers,
             authentication,
+            tls: None,
         }
     }
 }

@@ -1,4 +1,5 @@
 use async_nats::{Client, ConnectOptions};
+use std::io::Cursor;
 
 use crate::{
     credentials,
@@ -40,6 +41,13 @@ pub async fn connect_profile(
                 .map_err(|error| format!("invalid NATS credentials: {error}"))?
         }
     };
+    let options = if let Some(tls) = &profile.tls {
+        options
+            .tls_client_config(build_tls_config(tls)?)
+            .require_tls(true)
+    } else {
+        options
+    };
 
     let client = options
         .connect(profile.servers.as_slice())
@@ -61,4 +69,77 @@ pub async fn connect_profile(
     };
 
     Ok((client, jetstream_status, target))
+}
+
+fn build_tls_config(tls: &crate::profile::TlsConfig) -> Result<rustls::ClientConfig, String> {
+    let mut roots =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(key) = &tls.ca_certificate_key {
+        let pem = credentials::load(key).map_err(|error| {
+            format!("could not read CA certificate from system keychain: {error}")
+        })?;
+        let certificates = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("invalid CA certificate PEM: {error}"))?;
+        if certificates.is_empty() {
+            return Err("CA certificate PEM contains no certificates".to_owned());
+        }
+        for certificate in certificates {
+            roots
+                .add(certificate)
+                .map_err(|error| format!("invalid CA certificate: {error}"))?;
+        }
+    }
+
+    let client_auth = match (&tls.client_certificate_key, &tls.client_private_key_key) {
+        (Some(certificate_key), Some(private_key_key)) => {
+            let certificate_pem = credentials::load(certificate_key).map_err(|error| {
+                format!("could not read client certificate from system keychain: {error}")
+            })?;
+            let private_key_pem = credentials::load(private_key_key).map_err(|error| {
+                format!("could not read client private key from system keychain: {error}")
+            })?;
+            let certificates = rustls_pemfile::certs(&mut Cursor::new(certificate_pem.as_bytes()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("invalid client certificate PEM: {error}"))?;
+            if certificates.is_empty() {
+                return Err("client certificate PEM contains no certificates".to_owned());
+            }
+            let private_key =
+                rustls_pemfile::private_key(&mut Cursor::new(private_key_pem.as_bytes()))
+                    .map_err(|error| format!("invalid client private key PEM: {error}"))?
+                    .ok_or_else(|| "client private key PEM contains no private key".to_owned())?;
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(certificates, private_key)
+                .map_err(|error| format!("invalid mTLS client identity: {error}"))?
+        }
+        (None, None) => rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+        _ => {
+            return Err("both client certificate and private key are required for mTLS".to_owned());
+        }
+    };
+
+    Ok(client_auth)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::profile::TlsConfig;
+
+    use super::build_tls_config;
+
+    #[test]
+    fn mutual_tls_requires_both_client_certificate_and_private_key() {
+        let tls = TlsConfig {
+            ca_certificate_key: None,
+            client_certificate_key: Some("cert-entry".to_owned()),
+            client_private_key_key: None,
+        };
+
+        let error = build_tls_config(&tls).expect_err("partial mTLS identity must be rejected");
+        assert!(error.contains("both client certificate and private key are required"));
+    }
 }

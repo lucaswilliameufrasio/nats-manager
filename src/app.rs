@@ -5,7 +5,13 @@ use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 use nats_manager::connection::{self, JetStreamStatus};
-use nats_manager::profile::{Authentication, ConnectionProfile, ProfileStore};
+use nats_manager::profile::{Authentication, ConnectionProfile, ProfileStore, TlsConfig};
+
+enum TlsMaterial {
+    CaCertificate,
+    ClientCertificate,
+    ClientPrivateKey,
+}
 
 enum UiEvent {
     Connected(Result<(async_nats::Client, JetStreamStatus, String), String>),
@@ -24,6 +30,7 @@ pub struct NatsManagerApp {
     event_receiver: Receiver<UiEvent>,
     event_sender: Sender<UiEvent>,
     active_client: Option<async_nats::Client>,
+    server_info: Option<async_nats::ServerInfo>,
     jetstream_status: Option<JetStreamStatus>,
     profile_store: Option<ProfileStore>,
     profiles: Vec<ConnectionProfile>,
@@ -31,6 +38,9 @@ pub struct NatsManagerApp {
     username: String,
     password: String,
     use_password_auth: bool,
+    tls_ca_certificate_key: Option<String>,
+    tls_client_certificate_key: Option<String>,
+    tls_client_private_key_key: Option<String>,
     streams: Vec<String>,
     selected_stream: Option<String>,
     consumers: Vec<String>,
@@ -66,6 +76,7 @@ impl NatsManagerApp {
             event_receiver,
             event_sender,
             active_client: None,
+            server_info: None,
             jetstream_status: None,
             profile_store,
             profiles,
@@ -73,6 +84,9 @@ impl NatsManagerApp {
             username: String::new(),
             password: String::new(),
             use_password_auth: false,
+            tls_ca_certificate_key: None,
+            tls_client_certificate_key: None,
+            tls_client_private_key_key: None,
             streams: Vec::new(),
             selected_stream: None,
             consumers: Vec::new(),
@@ -127,7 +141,8 @@ impl NatsManagerApp {
             return;
         };
 
-        let profile = ConnectionProfile::new(name, servers, authentication);
+        let mut profile = ConnectionProfile::new(name, servers, authentication);
+        profile.tls = self.tls_config();
         if self.use_password_auth {
             let Authentication::UserPassword { credential_key, .. } = &profile.authentication
             else {
@@ -208,13 +223,14 @@ impl NatsManagerApp {
             return;
         }
 
-        let profile = ConnectionProfile::new(
+        let mut profile = ConnectionProfile::new(
             name,
             servers,
             Authentication::CredentialsFile {
                 credential_key: credential_key.clone(),
             },
         );
+        profile.tls = self.tls_config();
         let mut profiles = self.profiles.clone();
         profiles.push(profile);
         match store.save(&profiles) {
@@ -227,6 +243,62 @@ impl NatsManagerApp {
                 self.status = format!("Could not save imported profile: {error}");
             }
         }
+    }
+
+    fn tls_config(&self) -> Option<TlsConfig> {
+        if self.tls_ca_certificate_key.is_none()
+            && self.tls_client_certificate_key.is_none()
+            && self.tls_client_private_key_key.is_none()
+        {
+            return None;
+        }
+        Some(TlsConfig {
+            ca_certificate_key: self.tls_ca_certificate_key.clone(),
+            client_certificate_key: self.tls_client_certificate_key.clone(),
+            client_private_key_key: self.tls_client_private_key_key.clone(),
+        })
+    }
+
+    fn import_tls_material(&mut self, material: TlsMaterial) {
+        let (title, key_slot) = match material {
+            TlsMaterial::CaCertificate => {
+                ("Import CA certificate", &mut self.tls_ca_certificate_key)
+            }
+            TlsMaterial::ClientCertificate => (
+                "Import client certificate",
+                &mut self.tls_client_certificate_key,
+            ),
+            TlsMaterial::ClientPrivateKey => (
+                "Import client private key",
+                &mut self.tls_client_private_key_key,
+            ),
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter("PEM files", &["pem", "crt", "cer", "key"])
+            .pick_file()
+        else {
+            return;
+        };
+        let pem = match std::fs::read_to_string(path) {
+            Ok(pem) if !pem.trim().is_empty() => pem,
+            Ok(_) => {
+                self.status = "The selected PEM file is empty".to_owned();
+                return;
+            }
+            Err(error) => {
+                self.status = format!("Could not read PEM file: {error}");
+                return;
+            }
+        };
+        let key = format!("{}:tls", Uuid::new_v4());
+        if let Err(error) = nats_manager::credentials::store(&key, &pem) {
+            self.status = format!("Could not store TLS material in system keychain: {error}");
+            return;
+        }
+        *key_slot = Some(key);
+        self.status =
+            "TLS material stored in system keychain; save the profile to keep it".to_owned();
     }
 
     fn connect(&mut self) {
@@ -253,6 +325,7 @@ impl NatsManagerApp {
 
     fn spawn_connection(&mut self, profile: ConnectionProfile) {
         self.active_client = None;
+        self.server_info = None;
         self.jetstream_status = None;
         let sender = self.event_sender.clone();
         self.runtime.spawn(async move {
@@ -555,6 +628,7 @@ impl eframe::App for NatsManagerApp {
                 UiEvent::Connected(Ok((client, jetstream_status, target))) => {
                     let info = client.server_info();
                     self.status = format!("Connected to {target} (server {})", info.version);
+                    self.server_info = Some(info);
                     self.active_client = Some(client);
                     self.jetstream_status = Some(jetstream_status);
                     if matches!(
@@ -670,6 +744,25 @@ impl eframe::App for NatsManagerApp {
         {
             self.import_credentials_file();
         }
+        ui.separator();
+        ui.label("TLS / mTLS (imported PEM files are stored in the system keychain)");
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Import CA certificate").clicked() {
+                self.import_tls_material(TlsMaterial::CaCertificate);
+            }
+            if ui.button("Import client certificate").clicked() {
+                self.import_tls_material(TlsMaterial::ClientCertificate);
+            }
+            if ui.button("Import client private key").clicked() {
+                self.import_tls_material(TlsMaterial::ClientPrivateKey);
+            }
+        });
+        ui.label(format!(
+            "CA: {} · client certificate: {} · private key: {}",
+            self.tls_ca_certificate_key.is_some(),
+            self.tls_client_certificate_key.is_some(),
+            self.tls_client_private_key_key.is_some()
+        ));
 
         if !self.profiles.is_empty() {
             ui.add_space(12.0);
@@ -686,6 +779,35 @@ impl eframe::App for NatsManagerApp {
 
         ui.add_space(8.0);
         ui.label(&self.status);
+        if let Some(info) = &self.server_info {
+            egui::Grid::new("nats_server_info")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Server");
+                    ui.label(format!("{} ({})", info.server_name, info.server_id));
+                    ui.end_row();
+                    ui.label("Address");
+                    ui.label(format!("{}:{}", info.host, info.port));
+                    ui.end_row();
+                    ui.label("Cluster / domain");
+                    ui.label(format!(
+                        "{} / {}",
+                        info.cluster.as_deref().unwrap_or("—"),
+                        info.domain.as_deref().unwrap_or("—")
+                    ));
+                    ui.end_row();
+                    ui.label("Max payload / client IP");
+                    ui.label(format!("{} B / {}", info.max_payload, info.client_ip));
+                    ui.end_row();
+                    ui.label("Advertised servers");
+                    ui.label(if info.connect_urls.is_empty() {
+                        "—".to_owned()
+                    } else {
+                        info.connect_urls.join(", ")
+                    });
+                    ui.end_row();
+                });
+        }
         if let Some(status) = &self.jetstream_status {
             match status {
                 JetStreamStatus::Enabled {
