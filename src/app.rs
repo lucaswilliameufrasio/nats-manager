@@ -5,12 +5,20 @@ use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 use nats_manager::connection::{self, JetStreamStatus};
-use nats_manager::profile::{Authentication, ConnectionProfile, ProfileStore};
+use nats_manager::profile::{Authentication, ConnectionProfile, ProfileStore, TlsConfig};
+
+enum TlsMaterial {
+    CaCertificate,
+    ClientCertificate,
+    ClientPrivateKey,
+}
 
 enum UiEvent {
     Connected(Result<(async_nats::Client, JetStreamStatus, String), String>),
     Streams(Result<Vec<String>, String>),
+    StreamDetails(Result<nats_manager::jetstream::StreamDetails, String>),
     Consumers(Result<Vec<String>, String>),
+    ConsumerDetails(Result<nats_manager::jetstream::ConsumerDetails, String>),
     Messages(Result<Vec<nats_manager::jetstream::StoredMessage>, String>),
     Operation(Result<String, String>),
 }
@@ -22,6 +30,8 @@ pub struct NatsManagerApp {
     event_receiver: Receiver<UiEvent>,
     event_sender: Sender<UiEvent>,
     active_client: Option<async_nats::Client>,
+    server_info: Option<async_nats::ServerInfo>,
+    jetstream_api_prefix: Option<String>,
     jetstream_status: Option<JetStreamStatus>,
     profile_store: Option<ProfileStore>,
     profiles: Vec<ConnectionProfile>,
@@ -29,6 +39,9 @@ pub struct NatsManagerApp {
     username: String,
     password: String,
     use_password_auth: bool,
+    tls_ca_certificate_key: Option<String>,
+    tls_client_certificate_key: Option<String>,
+    tls_client_private_key_key: Option<String>,
     streams: Vec<String>,
     selected_stream: Option<String>,
     consumers: Vec<String>,
@@ -37,7 +50,10 @@ pub struct NatsManagerApp {
     new_stream_name: String,
     new_stream_subject: String,
     new_consumer_name: String,
+    max_deliver_input: String,
+    ack_wait_input: String,
     jetstream_message: String,
+    stream_details: Option<nats_manager::jetstream::StreamDetails>,
     messages: Vec<nats_manager::jetstream::StoredMessage>,
     selected_message: Option<u64>,
     publish_subject: String,
@@ -61,6 +77,8 @@ impl NatsManagerApp {
             event_receiver,
             event_sender,
             active_client: None,
+            server_info: None,
+            jetstream_api_prefix: None,
             jetstream_status: None,
             profile_store,
             profiles,
@@ -68,6 +86,9 @@ impl NatsManagerApp {
             username: String::new(),
             password: String::new(),
             use_password_auth: false,
+            tls_ca_certificate_key: None,
+            tls_client_certificate_key: None,
+            tls_client_private_key_key: None,
             streams: Vec::new(),
             selected_stream: None,
             consumers: Vec::new(),
@@ -76,7 +97,10 @@ impl NatsManagerApp {
             new_stream_name: String::new(),
             new_stream_subject: String::new(),
             new_consumer_name: String::new(),
+            max_deliver_input: String::new(),
+            ack_wait_input: String::new(),
             jetstream_message: String::new(),
+            stream_details: None,
             messages: Vec::new(),
             selected_message: None,
             publish_subject: String::new(),
@@ -119,7 +143,8 @@ impl NatsManagerApp {
             return;
         };
 
-        let profile = ConnectionProfile::new(name, servers, authentication);
+        let mut profile = ConnectionProfile::new(name, servers, authentication);
+        profile.tls = self.tls_config();
         if self.use_password_auth {
             let Authentication::UserPassword { credential_key, .. } = &profile.authentication
             else {
@@ -200,13 +225,14 @@ impl NatsManagerApp {
             return;
         }
 
-        let profile = ConnectionProfile::new(
+        let mut profile = ConnectionProfile::new(
             name,
             servers,
             Authentication::CredentialsFile {
                 credential_key: credential_key.clone(),
             },
         );
+        profile.tls = self.tls_config();
         let mut profiles = self.profiles.clone();
         profiles.push(profile);
         match store.save(&profiles) {
@@ -217,6 +243,99 @@ impl NatsManagerApp {
             Err(error) => {
                 let _ = nats_manager::credentials::delete(&credential_key);
                 self.status = format!("Could not save imported profile: {error}");
+            }
+        }
+    }
+
+    fn tls_config(&self) -> Option<TlsConfig> {
+        if self.tls_ca_certificate_key.is_none()
+            && self.tls_client_certificate_key.is_none()
+            && self.tls_client_private_key_key.is_none()
+        {
+            return None;
+        }
+        Some(TlsConfig {
+            ca_certificate_key: self.tls_ca_certificate_key.clone(),
+            client_certificate_key: self.tls_client_certificate_key.clone(),
+            client_private_key_key: self.tls_client_private_key_key.clone(),
+            tls_first: false,
+        })
+    }
+
+    fn import_tls_material(&mut self, material: TlsMaterial) {
+        let (title, key_slot) = match material {
+            TlsMaterial::CaCertificate => {
+                ("Import CA certificate", &mut self.tls_ca_certificate_key)
+            }
+            TlsMaterial::ClientCertificate => (
+                "Import client certificate",
+                &mut self.tls_client_certificate_key,
+            ),
+            TlsMaterial::ClientPrivateKey => (
+                "Import client private key",
+                &mut self.tls_client_private_key_key,
+            ),
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter("PEM files", &["pem", "crt", "cer", "key"])
+            .pick_file()
+        else {
+            return;
+        };
+        let pem = match std::fs::read_to_string(path) {
+            Ok(pem) if !pem.trim().is_empty() => pem,
+            Ok(_) => {
+                self.status = "The selected PEM file is empty".to_owned();
+                return;
+            }
+            Err(error) => {
+                self.status = format!("Could not read PEM file: {error}");
+                return;
+            }
+        };
+        let key = format!("{}:tls", Uuid::new_v4());
+        if let Err(error) = nats_manager::credentials::store(&key, &pem) {
+            self.status = format!("Could not store TLS material in system keychain: {error}");
+            return;
+        }
+        *key_slot = Some(key);
+        self.status =
+            "TLS material stored in system keychain; save the profile to keep it".to_owned();
+    }
+
+    fn import_nats_context(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import NATS CLI context")
+            .add_filter("NATS context JSON", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(store) = &self.profile_store else {
+            self.status = "Could not locate the application config directory".to_owned();
+            return;
+        };
+        let imported = match nats_manager::context_import::import_context(&path) {
+            Ok(imported) => imported,
+            Err(error) => {
+                self.status = format!("Could not import NATS context: {error}");
+                return;
+            }
+        };
+        let mut profiles = self.profiles.clone();
+        profiles.push(imported.profile);
+        match store.save(&profiles) {
+            Ok(()) => {
+                self.profiles = profiles;
+                self.status =
+                    "NATS CLI context imported; secrets stored in system keychain".to_owned();
+            }
+            Err(error) => {
+                for key in imported.credential_keys {
+                    let _ = nats_manager::credentials::delete(&key);
+                }
+                self.status = format!("Could not save imported context: {error}");
             }
         }
     }
@@ -245,6 +364,8 @@ impl NatsManagerApp {
 
     fn spawn_connection(&mut self, profile: ConnectionProfile) {
         self.active_client = None;
+        self.server_info = None;
+        self.jetstream_api_prefix = profile.jetstream_api_prefix.clone();
         self.jetstream_status = None;
         let sender = self.event_sender.clone();
         self.runtime.spawn(async move {
@@ -259,9 +380,10 @@ impl NatsManagerApp {
             return;
         };
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.runtime.spawn(async move {
             let _ = sender.send(UiEvent::Streams(
-                nats_manager::jetstream::list_streams(client).await,
+                nats_manager::jetstream::list_streams(client, api_prefix).await,
             ));
         });
     }
@@ -273,9 +395,46 @@ impl NatsManagerApp {
             return;
         };
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.runtime.spawn(async move {
-            let result = nats_manager::jetstream::list_consumers(client, stream_name).await;
+            let result =
+                nats_manager::jetstream::list_consumers(client, stream_name, api_prefix).await;
             let _ = sender.send(UiEvent::Consumers(result));
+        });
+    }
+
+    fn refresh_stream_details(&mut self) {
+        let (Some(client), Some(name)) = (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
+        self.runtime.spawn(async move {
+            let result = nats_manager::jetstream::describe_stream(client, name, api_prefix).await;
+            let _ = sender.send(UiEvent::StreamDetails(result));
+        });
+    }
+
+    fn refresh_consumer_details(&mut self) {
+        let (Some(client), Some(stream_name), Some(consumer_name)) = (
+            self.active_client.clone(),
+            self.selected_stream.clone(),
+            self.selected_consumer.clone(),
+        ) else {
+            return;
+        };
+        let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
+        self.runtime.spawn(async move {
+            let result = nats_manager::jetstream::describe_consumer(
+                client,
+                stream_name,
+                consumer_name,
+                api_prefix,
+            )
+            .await;
+            let _ = sender.send(UiEvent::ConsumerDetails(result));
         });
     }
 
@@ -314,12 +473,31 @@ impl NatsManagerApp {
         }
         self.jetstream_message = format!("Creating stream {name}…");
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.runtime.spawn(async move {
-            let result = nats_manager::jetstream::create_stream(client, name, subject)
+            let result = nats_manager::jetstream::create_stream(client, name, subject, api_prefix)
                 .await
                 .map(|()| "Stream created".to_owned());
             let _ = sender.send(UiEvent::Operation(result));
         });
+    }
+
+    fn update_selected_stream_subject(&mut self) {
+        let (Some(client), Some(name)) = (self.active_client.clone(), self.selected_stream.clone())
+        else {
+            return;
+        };
+        let subject = self.new_stream_subject.trim().to_owned();
+        if subject.is_empty() {
+            self.jetstream_message = "Stream subject is required".to_owned();
+            return;
+        }
+        self.run_operation(nats_manager::jetstream::update_stream_subject(
+            client,
+            name,
+            subject,
+            self.jetstream_api_prefix.clone(),
+        ));
     }
 
     fn delete_selected_stream(&mut self) {
@@ -333,7 +511,11 @@ impl NatsManagerApp {
         }
         self.resource_name_confirmation.clear();
         self.jetstream_message = format!("Deleting stream {name}…");
-        self.run_operation(nats_manager::jetstream::delete_stream(client, name));
+        self.run_operation(nats_manager::jetstream::delete_stream(
+            client,
+            name,
+            self.jetstream_api_prefix.clone(),
+        ));
     }
 
     fn create_consumer(&mut self) {
@@ -352,6 +534,39 @@ impl NatsManagerApp {
             client,
             stream_name,
             name,
+            self.jetstream_api_prefix.clone(),
+        ));
+    }
+
+    fn update_selected_consumer_limits(&mut self) {
+        let (Some(client), Some(stream_name), Some(consumer_name)) = (
+            self.active_client.clone(),
+            self.selected_stream.clone(),
+            self.selected_consumer.clone(),
+        ) else {
+            return;
+        };
+        let max_deliver = match self.max_deliver_input.trim().parse::<i64>() {
+            Ok(value) if value >= 0 => value,
+            _ => {
+                self.jetstream_message = "Max deliveries must be a non-negative integer".to_owned();
+                return;
+            }
+        };
+        let ack_wait_seconds = match self.ack_wait_input.trim().parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => {
+                self.jetstream_message = "Ack wait must be a non-negative integer".to_owned();
+                return;
+            }
+        };
+        self.run_operation(nats_manager::jetstream::update_consumer_limits(
+            client,
+            stream_name,
+            consumer_name,
+            max_deliver,
+            ack_wait_seconds,
+            self.jetstream_api_prefix.clone(),
         ));
     }
 
@@ -376,6 +591,7 @@ impl NatsManagerApp {
             client,
             stream_name,
             consumer_name,
+            self.jetstream_api_prefix.clone(),
         ));
     }
 
@@ -386,10 +602,16 @@ impl NatsManagerApp {
             return;
         };
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.jetstream_message = format!("Loading recent messages from {stream_name}…");
         self.runtime.spawn(async move {
-            let result =
-                nats_manager::jetstream::inspect_recent_messages(client, stream_name, 20).await;
+            let result = nats_manager::jetstream::inspect_recent_messages(
+                client,
+                stream_name,
+                20,
+                api_prefix,
+            )
+            .await;
             let _ = sender.send(UiEvent::Messages(result));
         });
     }
@@ -410,10 +632,18 @@ impl NatsManagerApp {
                 Some(JetStreamStatus::Enabled { .. })
             );
         let sender = self.event_sender.clone();
+        let api_prefix = self.jetstream_api_prefix.clone();
         self.jetstream_message = format!("Publishing to {subject}…");
         self.runtime.spawn(async move {
-            let result =
-                nats_manager::jetstream::publish(client, subject, payload, jetstream).await;
+            let result = nats_manager::jetstream::publish(
+                client,
+                subject,
+                payload,
+                async_nats::HeaderMap::new(),
+                jetstream,
+                api_prefix,
+            )
+            .await;
             let _ = sender.send(UiEvent::Operation(result));
         });
         self.publish_payload.clear();
@@ -435,6 +665,8 @@ impl NatsManagerApp {
             client,
             message.subject.clone(),
             message.payload.clone(),
+            message.headers.clone(),
+            self.jetstream_api_prefix.clone(),
         ));
     }
 
@@ -452,7 +684,11 @@ impl NatsManagerApp {
             return;
         }
         self.resource_name_confirmation.clear();
-        self.run_reported_operation(nats_manager::jetstream::purge_stream(client, stream_name));
+        self.run_reported_operation(nats_manager::jetstream::purge_stream(
+            client,
+            stream_name,
+            self.jetstream_api_prefix.clone(),
+        ));
     }
 }
 
@@ -472,6 +708,7 @@ impl eframe::App for NatsManagerApp {
                 UiEvent::Connected(Ok((client, jetstream_status, target))) => {
                     let info = client.server_info();
                     self.status = format!("Connected to {target} (server {})", info.version);
+                    self.server_info = Some(info);
                     self.active_client = Some(client);
                     self.jetstream_status = Some(jetstream_status);
                     if matches!(
@@ -493,12 +730,20 @@ impl eframe::App for NatsManagerApp {
                     {
                         self.selected_stream = self.streams.first().cloned();
                     }
+                    self.refresh_stream_details();
                     self.refresh_consumers();
                 }
                 UiEvent::Streams(Err(error)) => {
                     self.jetstream_message = format!("Could not list streams: {error}");
                 }
+                UiEvent::StreamDetails(Ok(details)) => {
+                    self.stream_details = Some(details);
+                }
+                UiEvent::StreamDetails(Err(error)) => {
+                    self.jetstream_message = format!("Could not load stream details: {error}");
+                }
                 UiEvent::Consumers(Ok(consumers)) => {
+                    let previous = self.selected_consumer.clone();
                     self.consumers = consumers;
                     if !self
                         .selected_consumer
@@ -507,9 +752,19 @@ impl eframe::App for NatsManagerApp {
                     {
                         self.selected_consumer = self.consumers.first().cloned();
                     }
+                    if previous != self.selected_consumer {
+                        self.refresh_consumer_details();
+                    }
                 }
                 UiEvent::Consumers(Err(error)) => {
                     self.jetstream_message = format!("Could not list consumers: {error}");
+                }
+                UiEvent::ConsumerDetails(Ok(details)) => {
+                    self.max_deliver_input = details.max_deliver.to_string();
+                    self.ack_wait_input = details.ack_wait_seconds.to_string();
+                }
+                UiEvent::ConsumerDetails(Err(error)) => {
+                    self.jetstream_message = format!("Could not load consumer details: {error}");
                 }
                 UiEvent::Messages(Ok(messages)) => {
                     self.messages = messages;
@@ -569,6 +824,28 @@ impl eframe::App for NatsManagerApp {
         {
             self.import_credentials_file();
         }
+        if ui.button("Import NATS CLI context JSON").clicked() {
+            self.import_nats_context();
+        }
+        ui.separator();
+        ui.label("TLS / mTLS (imported PEM files are stored in the system keychain)");
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Import CA certificate").clicked() {
+                self.import_tls_material(TlsMaterial::CaCertificate);
+            }
+            if ui.button("Import client certificate").clicked() {
+                self.import_tls_material(TlsMaterial::ClientCertificate);
+            }
+            if ui.button("Import client private key").clicked() {
+                self.import_tls_material(TlsMaterial::ClientPrivateKey);
+            }
+        });
+        ui.label(format!(
+            "CA: {} · client certificate: {} · private key: {}",
+            self.tls_ca_certificate_key.is_some(),
+            self.tls_client_certificate_key.is_some(),
+            self.tls_client_private_key_key.is_some()
+        ));
 
         if !self.profiles.is_empty() {
             ui.add_space(12.0);
@@ -585,6 +862,35 @@ impl eframe::App for NatsManagerApp {
 
         ui.add_space(8.0);
         ui.label(&self.status);
+        if let Some(info) = &self.server_info {
+            egui::Grid::new("nats_server_info")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Server");
+                    ui.label(format!("{} ({})", info.server_name, info.server_id));
+                    ui.end_row();
+                    ui.label("Address");
+                    ui.label(format!("{}:{}", info.host, info.port));
+                    ui.end_row();
+                    ui.label("Cluster / domain");
+                    ui.label(format!(
+                        "{} / {}",
+                        info.cluster.as_deref().unwrap_or("—"),
+                        info.domain.as_deref().unwrap_or("—")
+                    ));
+                    ui.end_row();
+                    ui.label("Max payload / client IP");
+                    ui.label(format!("{} B / {}", info.max_payload, info.client_ip));
+                    ui.end_row();
+                    ui.label("Advertised servers");
+                    ui.label(if info.connect_urls.is_empty() {
+                        "—".to_owned()
+                    } else {
+                        info.connect_urls.join(", ")
+                    });
+                    ui.end_row();
+                });
+        }
         if let Some(status) = &self.jetstream_status {
             match status {
                 JetStreamStatus::Enabled {
@@ -642,16 +948,34 @@ impl eframe::App for NatsManagerApp {
                         self.selected_stream = Some(stream);
                         self.selected_consumer = None;
                         self.consumers.clear();
+                        self.stream_details = None;
                         selected_stream_changed = true;
                     }
                 }
             });
             if selected_stream_changed {
+                self.refresh_stream_details();
                 self.refresh_consumers();
             }
 
             if let Some(stream) = self.selected_stream.clone() {
                 ui.label(format!("Selected stream: {stream}"));
+                if let Some(details) = &self.stream_details {
+                    ui.label(format!(
+                        "Subjects: {} · {} message(s) · {} B · {} consumer(s)",
+                        details.subjects.join(", "),
+                        details.messages,
+                        details.bytes,
+                        details.consumers
+                    ));
+                }
+                ui.horizontal(|ui| {
+                    ui.label("New subject filter");
+                    ui.text_edit_singleline(&mut self.new_stream_subject);
+                    if ui.button("Update stream subject").clicked() {
+                        self.update_selected_stream_subject();
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("Type stream name to delete");
                     ui.text_edit_singleline(&mut self.resource_name_confirmation);
@@ -675,12 +999,21 @@ impl eframe::App for NatsManagerApp {
                         self.create_consumer();
                     }
                 });
+                let mut selected_consumer_changed = false;
                 for consumer in self.consumers.clone() {
-                    ui.selectable_value(
-                        &mut self.selected_consumer,
-                        Some(consumer.clone()),
-                        consumer,
-                    );
+                    if ui
+                        .selectable_label(
+                            self.selected_consumer.as_ref() == Some(&consumer),
+                            &consumer,
+                        )
+                        .clicked()
+                    {
+                        self.selected_consumer = Some(consumer);
+                        selected_consumer_changed = true;
+                    }
+                }
+                if selected_consumer_changed {
+                    self.refresh_consumer_details();
                 }
                 if let Some(consumer) = self.selected_consumer.clone() {
                     ui.horizontal(|ui| {
@@ -693,6 +1026,15 @@ impl eframe::App for NatsManagerApp {
                         ui.label("Type consumer name to confirm");
                         ui.text_edit_singleline(&mut self.resource_name_confirmation);
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Max deliveries");
+                        ui.text_edit_singleline(&mut self.max_deliver_input);
+                        ui.label("Ack wait (seconds)");
+                        ui.text_edit_singleline(&mut self.ack_wait_input);
+                        if ui.button("Update consumer limits").clicked() {
+                            self.update_selected_consumer_limits();
+                        }
+                    });
                 }
 
                 ui.separator();
@@ -700,10 +1042,36 @@ impl eframe::App for NatsManagerApp {
                 for message in self.messages.clone() {
                     let preview = String::from_utf8_lossy(&message.payload);
                     let preview = preview.chars().take(160).collect::<String>();
+                    let headers = message
+                        .headers
+                        .iter()
+                        .map(|(name, values)| {
+                            format!(
+                                "{}: {}",
+                                name,
+                                values
+                                    .iter()
+                                    .map(|value| value.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
                     ui.selectable_value(
                         &mut self.selected_message,
                         Some(message.sequence),
-                        format!("#{} {} — {}", message.sequence, message.subject, preview),
+                        format!(
+                            "#{} {} — {}{}",
+                            message.sequence,
+                            message.subject,
+                            preview,
+                            if headers.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {headers}")
+                            }
+                        ),
                     );
                 }
                 if self.selected_message.is_some() && ui.button("Replay selected message").clicked()

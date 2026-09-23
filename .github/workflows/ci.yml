@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Compile
+        run: cargo check --locked
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run unit and integration tests
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -d --name nats-manager-js -p 127.0.0.1:4222:4222 nats:2.12-alpine -js
+          docker run --rm -d --name nats-manager-core -p 127.0.0.1:14223:4222 nats:2.12-alpine
+          trap 'docker stop nats-manager-js nats-manager-core >/dev/null 2>&1 || true' EXIT
+          NATS_URL=nats://127.0.0.1:4222 NATS_NO_JS_URL=nats://127.0.0.1:14223 cargo test --locked --all-targets
+
+      - name: Run tests
+        if: runner.os == 'macOS'
+        run: cargo test --locked --all-targets
+
+      - name: Build release binary
+        run: cargo build --locked --release
