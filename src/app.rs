@@ -4,15 +4,19 @@ use eframe::egui;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
+use crate::connection::{self, JetStreamStatus};
 use crate::profile::{Authentication, ConnectionProfile, ProfileStore};
+
+type ConnectionResult = Result<(async_nats::Client, JetStreamStatus, String), String>;
 
 pub struct NatsManagerApp {
     runtime: Runtime,
     server_url: String,
     status: String,
-    connection_result: Option<Receiver<Result<async_nats::Client, String>>>,
-    connection_sender: Sender<Result<async_nats::Client, String>>,
+    connection_result: Option<Receiver<ConnectionResult>>,
+    connection_sender: Sender<ConnectionResult>,
     active_client: Option<async_nats::Client>,
+    jetstream_status: Option<JetStreamStatus>,
     profile_store: Option<ProfileStore>,
     profiles: Vec<ConnectionProfile>,
     profile_name: String,
@@ -37,6 +41,7 @@ impl NatsManagerApp {
             connection_result: Some(connection_result),
             connection_sender,
             active_client: None,
+            jetstream_status: None,
             profile_store,
             profiles,
             profile_name: String::new(),
@@ -184,7 +189,6 @@ impl NatsManagerApp {
 
     fn connect(&mut self) {
         let url = self.server_url.trim().to_owned();
-        let sender = self.connection_sender.clone();
 
         if url.is_empty() {
             self.status = "Enter a NATS server URL".to_owned();
@@ -192,12 +196,25 @@ impl NatsManagerApp {
         }
 
         self.status = format!("Connecting to {url}…");
-        self.runtime.spawn(async move {
-            let result = async_nats::connect(&url)
-                .await
-                .map_err(|error| error.to_string());
+        let profile = ConnectionProfile::new(
+            "Temporary connection".to_owned(),
+            url.split(',').map(str::trim).map(str::to_owned).collect(),
+            Authentication::None,
+        );
+        self.spawn_connection(profile);
+    }
 
-            let _ = sender.send(result);
+    fn connect_saved_profile(&mut self, profile: ConnectionProfile) {
+        self.status = format!("Connecting to profile {}…", profile.name);
+        self.spawn_connection(profile);
+    }
+
+    fn spawn_connection(&mut self, profile: ConnectionProfile) {
+        self.active_client = None;
+        self.jetstream_status = None;
+        let sender = self.connection_sender.clone();
+        self.runtime.spawn(async move {
+            let _ = sender.send(connection::connect_profile(profile).await);
         });
     }
 }
@@ -206,11 +223,11 @@ impl eframe::App for NatsManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(receiver) = &self.connection_result {
             match receiver.try_recv() {
-                Ok(Ok(client)) => {
+                Ok(Ok((client, jetstream_status, target))) => {
                     let info = client.server_info();
-                    self.status =
-                        format!("Connected to {} (server {})", self.server_url, info.version);
+                    self.status = format!("Connected to {target} (server {})", info.version);
                     self.active_client = Some(client);
+                    self.jetstream_status = Some(jetstream_status);
                 }
                 Ok(Err(error)) => self.status = format!("Connection failed: {error}"),
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -263,15 +280,32 @@ impl eframe::App for NatsManagerApp {
         if !self.profiles.is_empty() {
             ui.add_space(12.0);
             ui.heading("Saved profiles");
-            for profile in &self.profiles {
-                ui.label(format!("{} — {}", profile.name, profile.servers.join(", ")));
+            for profile in self.profiles.clone() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} — {}", profile.name, profile.servers.join(", ")));
+                    if ui.button("Connect").clicked() {
+                        self.connect_saved_profile(profile);
+                    }
+                });
             }
         }
 
         ui.add_space(8.0);
         ui.label(&self.status);
+        if let Some(status) = &self.jetstream_status {
+            match status {
+                JetStreamStatus::Enabled => {
+                    ui.label("JetStream: enabled");
+                }
+                JetStreamStatus::Unavailable(reason) => {
+                    ui.label(format!("JetStream: unavailable ({reason})"));
+                }
+            }
+        }
         ui.add_space(16.0);
-        ui.weak("JetStream and cluster details will appear after connecting.");
+        if self.active_client.is_none() {
+            ui.weak("Cluster details will appear after connecting.");
+        }
 
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));

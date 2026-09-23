@@ -1,4 +1,5 @@
 mod app;
+mod connection;
 pub mod credentials;
 mod profile;
 
