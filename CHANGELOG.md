@@ -2,6 +2,23 @@
 
 All notable changes to NATS Manager will be documented in this file.
 
+## [0.1.1] - 2026-09-24
+
+### Bug Fixes
+
+- *(release)* Locate universal macOS bundles
+
+### CI / Build
+
+- *(release)* Publish native desktop installers
+
+### Documentation
+
+- *(macos)* Document Gatekeeper warning and signing
+
+### Features
+
+- *(branding)* Add NATS Manager logo and bundle icon
 ## [0.1.0] - 2026-09-23
 
 ### Bug Fixes
