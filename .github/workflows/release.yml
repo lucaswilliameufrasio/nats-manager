@@ -211,14 +211,90 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  # Build native desktop installers in addition to cargo-dist's portable archives.
+  build-native-bundles:
+    needs:
+      - plan
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+          - os: macos-latest
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install macOS Rust targets
+        if: matrix.platform == 'macos'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: Install Linux desktop build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --version 0.12.0 --locked
+      - name: Build Linux packages
+        if: matrix.platform == 'linux'
+        run: |
+          cargo bundle --release --format deb
+          cargo bundle --release --format appimage
+          mkdir -p "$RUNNER_TEMP/nats-manager-bundles"
+          find target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -exec cp {} "$RUNNER_TEMP/nats-manager-bundles/" \;
+          find target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -exec cp {} "$RUNNER_TEMP/nats-manager-bundles/" \;
+          test -n "$(find "$RUNNER_TEMP/nats-manager-bundles" -type f -print -quit)"
+          cd "$RUNNER_TEMP/nats-manager-bundles"
+          sha256sum * > SHA256SUMS-linux
+      - name: Build macOS app and disk image
+        if: matrix.platform == 'macos'
+        run: |
+          cargo bundle --release --format osx \
+            --target x86_64-apple-darwin \
+            --target aarch64-apple-darwin
+          cargo bundle --release --format dmg \
+            --target x86_64-apple-darwin \
+            --target aarch64-apple-darwin
+          mkdir -p "$RUNNER_TEMP/nats-manager-bundles"
+          app_path="$(find target/release/bundle/osx -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg_path="$(find target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$app_path"
+          test -n "$dmg_path"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$RUNNER_TEMP/nats-manager-bundles/nats-manager-macos.app.zip"
+          cp "$dmg_path" "$RUNNER_TEMP/nats-manager-bundles/"
+          cd "$RUNNER_TEMP/nats-manager-bundles"
+          shasum -a 256 * > SHA256SUMS-macos
+      - name: Upload native bundles for release hosting
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-native-${{ matrix.platform }}
+          path: ${{ runner.temp }}/nats-manager-bundles/*
+          if-no-files-found: error
+
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - build-native-bundles
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-native-bundles.result == 'skipped' || needs.build-native-bundles.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

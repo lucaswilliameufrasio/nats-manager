@@ -1,0 +1,123 @@
+name: Bundle release installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub Release tag to add native bundles to (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Native bundles (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+          - os: macos-latest
+            platform: macos
+
+    steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag must use vMAJOR.MINOR.PATCH (for example v0.1.0)." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install macOS Rust targets
+        if: matrix.platform == 'macos'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Install Linux desktop build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --version 0.12.0 --locked
+
+      - name: Build Linux packages
+        if: matrix.platform == 'linux'
+        run: |
+          cargo bundle --release --format deb
+          cargo bundle --release --format appimage
+          mkdir -p "$RUNNER_TEMP/nats-manager-bundles"
+          find target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -exec cp {} "$RUNNER_TEMP/nats-manager-bundles/" \;
+          find target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -exec cp {} "$RUNNER_TEMP/nats-manager-bundles/" \;
+          test -n "$(find "$RUNNER_TEMP/nats-manager-bundles" -type f -print -quit)"
+          cd "$RUNNER_TEMP/nats-manager-bundles"
+          sha256sum * > SHA256SUMS-linux
+
+      - name: Build universal macOS app and disk image
+        if: matrix.platform == 'macos'
+        run: |
+          cargo bundle --release --format osx \
+            --target x86_64-apple-darwin \
+            --target aarch64-apple-darwin
+          cargo bundle --release --format dmg \
+            --target x86_64-apple-darwin \
+            --target aarch64-apple-darwin
+          mkdir -p "$RUNNER_TEMP/nats-manager-bundles"
+          app_path="$(find target/release/bundle/osx -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg_path="$(find target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$app_path"
+          test -n "$dmg_path"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$RUNNER_TEMP/nats-manager-bundles/nats-manager-macos.app.zip"
+          cp "$dmg_path" "$RUNNER_TEMP/nats-manager-bundles/"
+          cd "$RUNNER_TEMP/nats-manager-bundles"
+          shasum -a 256 * > SHA256SUMS-macos
+
+      - name: Upload bundles for the release publishing job
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-bundles-${{ matrix.platform }}
+          path: ${{ runner.temp }}/nats-manager-bundles/*
+          if-no-files-found: error
+
+  publish:
+    name: Add bundles to GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Download Linux and macOS bundles
+        uses: actions/download-artifact@v8
+        with:
+          pattern: native-bundles-*
+          path: native-bundles/
+          merge-multiple: true
+
+      - name: Upload bundles to the existing release
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null
+          gh release upload "$RELEASE_TAG" native-bundles/* --clobber
