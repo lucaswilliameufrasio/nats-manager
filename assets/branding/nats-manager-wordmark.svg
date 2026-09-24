@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="420" viewBox="0 0 1240 420" fill="none">
+  <defs>
+    <linearGradient id="wordmark-signal" x1="62" y1="52" x2="354" y2="352" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5CF0D2"/>
+      <stop offset="0.54" stop-color="#36BFE3"/>
+      <stop offset="1" stop-color="#6B8CFF"/>
+    </linearGradient>
+    <linearGradient id="wordmark-surface" x1="25" y1="20" x2="395" y2="400" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#14233E"/>
+      <stop offset="1" stop-color="#091321"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1240" height="420" rx="28" fill="#F7FAFC"/>
+  <rect x="12" y="12" width="396" height="396" rx="96" fill="url(#wordmark-surface)"/>
+  <path d="M114 308V112L310 308V112" stroke="url(#wordmark-signal)" stroke-width="31" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="212" cy="210" r="28" fill="#F5FFFC"/>
+  <circle cx="212" cy="210" r="11" fill="#27AFC7"/>
+
+  <text x="470" y="212" fill="#14233E" font-family="Inter, SF Pro Display, Arial, sans-serif" font-size="126" font-weight="760" letter-spacing="3">NATS</text>
+  <text x="478" y="293" fill="#507089" font-family="Inter, SF Pro Display, Arial, sans-serif" font-size="42" font-weight="650" letter-spacing="14">MANAGER</text>
+  <path d="M478 337H1120" stroke="#36BFE3" stroke-opacity="0.45" stroke-width="4" stroke-linecap="round"/>
+  <text x="478" y="380" fill="#69839A" font-family="Inter, SF Pro Display, Arial, sans-serif" font-size="26" font-weight="500" letter-spacing="2">CLUSTER OPERATIONS CONSOLE</text>
+</svg>

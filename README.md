@@ -2,6 +2,8 @@
 
 A Linux and macOS desktop application for inspecting and administering existing NATS clusters, with or without JetStream.
 
+![NATS Manager logo](assets/branding/nats-manager-wordmark.svg)
+
 ## Initial scope
 
 - Connect to existing NATS clusters and import connection configuration.
