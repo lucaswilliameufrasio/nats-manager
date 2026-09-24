@@ -271,8 +271,8 @@ jobs:
             --target x86_64-apple-darwin \
             --target aarch64-apple-darwin
           mkdir -p "$RUNNER_TEMP/nats-manager-bundles"
-          app_path="$(find target/release/bundle/osx -maxdepth 1 -type d -name '*.app' -print -quit)"
-          dmg_path="$(find target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          app_path="$(find target/universal/release/bundle/osx -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg_path="$(find target/universal/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
           test -n "$app_path"
           test -n "$dmg_path"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "$RUNNER_TEMP/nats-manager-bundles/nats-manager-macos.app.zip"
