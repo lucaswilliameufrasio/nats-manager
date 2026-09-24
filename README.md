@@ -30,3 +30,5 @@ GitHub Actions checks formatting, compilation, Clippy, and tests on Linux and ma
 ## Releases
 
 Use **Actions → Prepare Release → Run workflow** on `main` and enter a SemVer version. The workflow updates the changelog and Cargo version, then opens a release-preparation PR. After that PR is merged, create and push the matching `vX.Y.Z` tag. The `Release` workflow publishes cargo-dist archives for x86_64/ARM64 Linux and macOS, plus native Linux `.AppImage`/`.deb` and a universal macOS `.app.zip`/`.dmg`, each with checksums. For an existing release, **Actions → Bundle release installers** can attach the native installer files to its tag. If the tag does not yet have a GitHub Release, rerun **Release** for that tag first, then run **Bundle release installers**.
+
+The macOS app is currently unsigned and not notarized; Gatekeeper may report it as damaged on first launch. See [macOS Gatekeeper and signing](docs/macos-gatekeeper.md) for the one-time workaround and the future signing setup.
