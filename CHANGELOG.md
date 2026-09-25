@@ -2,6 +2,11 @@
 
 All notable changes to NATS Manager will be documented in this file.
 
+## [0.2.0] - 2026-09-25
+
+### Features
+
+- *(ui)* Refresh workspace and add NATS E2E tooling
 ## [0.1.2] - 2026-09-25
 
 ### Features
