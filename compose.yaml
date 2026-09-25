@@ -1,0 +1,35 @@
+name: nats-manager-dev
+
+services:
+  nats-jetstream:
+    image: nats:2.12-alpine
+    command: ["--jetstream", "--store_dir", "/data", "--http_port", "8222"]
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:18222:8222"
+    volumes:
+      - jetstream-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: unless-stopped
+
+  nats-core:
+    image: nats:2.12-alpine
+    command: ["--http_port", "8222"]
+    ports:
+      - "127.0.0.1:14223:4222"
+      - "127.0.0.1:18223:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: unless-stopped
+
+volumes:
+  jetstream-data:

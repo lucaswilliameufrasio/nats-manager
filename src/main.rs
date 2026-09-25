@@ -13,6 +13,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "NATS Manager",
         eframe::NativeOptions::default(),
-        Box::new(move |_creation_context| Ok(Box::new(app::NatsManagerApp::new(runtime)))),
+        Box::new(move |creation_context| {
+            app::configure_theme(&creation_context.egui_ctx);
+            Ok(Box::new(app::NatsManagerApp::new(runtime)))
+        }),
     )
 }

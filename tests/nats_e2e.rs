@@ -4,6 +4,7 @@ use nats_manager::{
     jetstream,
     profile::{Authentication, ConnectionProfile},
 };
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 fn profile_for(url: String) -> ConnectionProfile {
@@ -190,4 +191,74 @@ async fn connection_reports_when_jetstream_is_unavailable() {
         .await
         .expect("published core message should arrive");
     assert_eq!(message.payload.as_ref(), b"core payload");
+}
+
+#[tokio::test]
+async fn jetstream_publish_e2e_latency_budget_smoke() {
+    const MESSAGE_COUNT: usize = 200;
+
+    let Ok(url) = std::env::var("NATS_URL") else {
+        eprintln!("Skipping JetStream performance smoke test: NATS_URL is not set");
+        return;
+    };
+    let (client, status, _) = connection::connect_profile(profile_for(url))
+        .await
+        .expect("should connect to the real JetStream server");
+    assert!(matches!(status, JetStreamStatus::Enabled { .. }));
+
+    let unique = Uuid::new_v4().simple().to_string();
+    let stream = format!("NATS_MANAGER_PERF_{unique}");
+    let subject = format!("nats_manager_perf.{unique}");
+    jetstream::create_stream(client.clone(), stream.clone(), subject.clone(), None)
+        .await
+        .expect("performance stream should be created");
+
+    let mut latencies = Vec::with_capacity(MESSAGE_COUNT);
+    let total_started = Instant::now();
+    for sequence in 0..MESSAGE_COUNT {
+        let started = Instant::now();
+        jetstream::publish(
+            client.clone(),
+            subject.clone(),
+            format!("performance sample {sequence}").into_bytes(),
+            async_nats::HeaderMap::new(),
+            true,
+            None,
+        )
+        .await
+        .expect("JetStream publish should receive a storage acknowledgement");
+        latencies.push(started.elapsed());
+    }
+    let total = total_started.elapsed();
+    let stored = jetstream::describe_stream(client.clone(), stream.clone(), None)
+        .await
+        .expect("stream state should be readable after publishing");
+    jetstream::delete_stream(client, stream, None)
+        .await
+        .expect("temporary performance stream should be deleted");
+
+    assert_eq!(stored.messages, MESSAGE_COUNT as u64);
+    let p95 = percentile(&mut latencies, 0.95);
+    let throughput = MESSAGE_COUNT as f64 / total.as_secs_f64();
+    eprintln!(
+        "JetStream E2E: {MESSAGE_COUNT} acknowledged messages in {total:?}; p50={:?}, p95={p95:?}, throughput={throughput:.0} msg/s",
+        percentile(&mut latencies.clone(), 0.50),
+    );
+
+    assert!(
+        p95 < Duration::from_secs(2),
+        "local JetStream publish p95 exceeded the 2s smoke budget: {p95:?}"
+    );
+    assert!(
+        total < Duration::from_secs(20),
+        "{MESSAGE_COUNT} acknowledged publishes exceeded the 20s smoke budget: {total:?}"
+    );
+}
+
+fn percentile(samples: &mut [Duration], percentile: f64) -> Duration {
+    samples.sort_unstable();
+    let index = ((samples.len() as f64 * percentile).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len().saturating_sub(1));
+    samples[index]
 }
