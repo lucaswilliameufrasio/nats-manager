@@ -2,6 +2,11 @@
 
 All notable changes to NATS Manager will be documented in this file.
 
+## [0.1.2] - 2026-09-25
+
+### Features
+
+- *(ui)* Introduce capability-based navigation
 ## [0.1.1] - 2026-09-24
 
 ### Bug Fixes
