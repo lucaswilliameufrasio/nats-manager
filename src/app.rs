@@ -7,6 +7,16 @@ use uuid::Uuid;
 use nats_manager::connection::{self, JetStreamStatus};
 use nats_manager::profile::{Authentication, ConnectionProfile, ProfileStore, TlsConfig};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AppPage {
+    #[default]
+    Connections,
+    Overview,
+    JetStream,
+    Publish,
+    Maintenance,
+}
+
 enum TlsMaterial {
     CaCertificate,
     ClientCertificate,
@@ -25,6 +35,7 @@ enum UiEvent {
 
 pub struct NatsManagerApp {
     runtime: Runtime,
+    current_page: AppPage,
     server_url: String,
     status: String,
     event_receiver: Receiver<UiEvent>,
@@ -46,7 +57,8 @@ pub struct NatsManagerApp {
     selected_stream: Option<String>,
     consumers: Vec<String>,
     selected_consumer: Option<String>,
-    resource_name_confirmation: String,
+    stream_name_confirmation: String,
+    consumer_name_confirmation: String,
     new_stream_name: String,
     new_stream_subject: String,
     new_consumer_name: String,
@@ -72,6 +84,7 @@ impl NatsManagerApp {
 
         Self {
             runtime,
+            current_page: AppPage::Connections,
             server_url: "nats://127.0.0.1:4222".to_owned(),
             status: "Not connected".to_owned(),
             event_receiver,
@@ -93,7 +106,8 @@ impl NatsManagerApp {
             selected_stream: None,
             consumers: Vec::new(),
             selected_consumer: None,
-            resource_name_confirmation: String::new(),
+            stream_name_confirmation: String::new(),
+            consumer_name_confirmation: String::new(),
             new_stream_name: String::new(),
             new_stream_subject: String::new(),
             new_consumer_name: String::new(),
@@ -505,11 +519,11 @@ impl NatsManagerApp {
         else {
             return;
         };
-        if !nats_manager::safety::confirms_resource_name(&name, &self.resource_name_confirmation) {
+        if !nats_manager::safety::confirms_resource_name(&name, &self.stream_name_confirmation) {
             self.jetstream_message = "Type the exact stream name to confirm deletion".to_owned();
             return;
         }
-        self.resource_name_confirmation.clear();
+        self.stream_name_confirmation.clear();
         self.jetstream_message = format!("Deleting stream {name}…");
         self.run_operation(nats_manager::jetstream::delete_stream(
             client,
@@ -580,12 +594,12 @@ impl NatsManagerApp {
         };
         if !nats_manager::safety::confirms_resource_name(
             &consumer_name,
-            &self.resource_name_confirmation,
+            &self.consumer_name_confirmation,
         ) {
             self.jetstream_message = "Type the exact consumer name to confirm deletion".to_owned();
             return;
         }
-        self.resource_name_confirmation.clear();
+        self.consumer_name_confirmation.clear();
         self.jetstream_message = format!("Deleting consumer {consumer_name}…");
         self.run_operation(nats_manager::jetstream::delete_consumer(
             client,
@@ -678,12 +692,12 @@ impl NatsManagerApp {
         };
         if !nats_manager::safety::confirms_resource_name(
             &stream_name,
-            &self.resource_name_confirmation,
+            &self.stream_name_confirmation,
         ) {
             self.jetstream_message = "Type the exact stream name to confirm purge".to_owned();
             return;
         }
-        self.resource_name_confirmation.clear();
+        self.stream_name_confirmation.clear();
         self.run_reported_operation(nats_manager::jetstream::purge_stream(
             client,
             stream_name,
@@ -711,6 +725,7 @@ impl eframe::App for NatsManagerApp {
                     self.server_info = Some(info);
                     self.active_client = Some(client);
                     self.jetstream_status = Some(jetstream_status);
+                    self.current_page = AppPage::Overview;
                     if matches!(
                         &self.jetstream_status,
                         Some(JetStreamStatus::Enabled { .. })
@@ -785,9 +800,52 @@ impl eframe::App for NatsManagerApp {
             }
         }
 
-        ui.heading("NATS Manager");
-        ui.label("Connect to and manage existing NATS clusters.");
-        ui.add_space(16.0);
+        egui::Panel::left("main_navigation")
+            .resizable(false)
+            .default_size(184.0)
+            .show(ui, |ui| {
+                ui.add_space(8.0);
+                ui.heading("NATS Manager");
+                ui.small(format!("v{}", env!("CARGO_PKG_VERSION")));
+                ui.add_space(20.0);
+                for (page, label) in [
+                    (AppPage::Connections, "Connections"),
+                    (AppPage::Overview, "Overview"),
+                    (AppPage::JetStream, "JetStream"),
+                    (AppPage::Publish, "Publish"),
+                    (AppPage::Maintenance, "Maintenance"),
+                ] {
+                    if ui
+                        .selectable_label(self.current_page == page, label)
+                        .clicked()
+                    {
+                        self.current_page = page;
+                    }
+                }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.separator();
+                    ui.label(if self.active_client.is_some() {
+                        "● Connected"
+                    } else {
+                        "○ Disconnected"
+                    });
+                });
+            });
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading(match self.current_page {
+                    AppPage::Connections => "Connections",
+                    AppPage::Overview => "Cluster overview",
+                    AppPage::JetStream => "JetStream",
+                    AppPage::Publish => "Publish messages",
+                    AppPage::Maintenance => "Maintenance",
+                });
+                ui.add_space(12.0);
+
+                if self.current_page == AppPage::Connections {
+                    ui.label("Connect to existing NATS clusters and manage saved profiles.");
+                    ui.add_space(8.0);
 
         ui.horizontal(|ui| {
             ui.label("Server URL");
@@ -860,6 +918,9 @@ impl eframe::App for NatsManagerApp {
             }
         }
 
+                }
+
+                if self.current_page == AppPage::Overview {
         ui.add_space(8.0);
         ui.label(&self.status);
         if let Some(info) = &self.server_info {
@@ -914,11 +975,13 @@ impl eframe::App for NatsManagerApp {
         if self.active_client.is_none() {
             ui.weak("Cluster details will appear after connecting.");
         }
+                }
 
         if matches!(
             &self.jetstream_status,
             Some(JetStreamStatus::Enabled { .. })
-        ) {
+        ) && self.current_page == AppPage::JetStream
+        {
             ui.add_space(16.0);
             ui.separator();
             ui.heading("JetStream");
@@ -976,16 +1039,6 @@ impl eframe::App for NatsManagerApp {
                         self.update_selected_stream_subject();
                     }
                 });
-                ui.horizontal(|ui| {
-                    ui.label("Type stream name to delete");
-                    ui.text_edit_singleline(&mut self.resource_name_confirmation);
-                    if ui.button("Delete stream").clicked() {
-                        self.delete_selected_stream();
-                    }
-                    if ui.button("Purge messages").clicked() {
-                        self.purge_selected_stream();
-                    }
-                });
                 if ui.button("Inspect recent messages").clicked() {
                     self.inspect_recent_messages();
                 }
@@ -1016,16 +1069,7 @@ impl eframe::App for NatsManagerApp {
                     self.refresh_consumer_details();
                 }
                 if let Some(consumer) = self.selected_consumer.clone() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Selected consumer: {consumer}"));
-                        if ui.button("Delete consumer").clicked() {
-                            self.delete_selected_consumer();
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Type consumer name to confirm");
-                        ui.text_edit_singleline(&mut self.resource_name_confirmation);
-                    });
+                    ui.label(format!("Selected consumer: {consumer}"));
                     ui.horizontal(|ui| {
                         ui.label("Max deliveries");
                         ui.text_edit_singleline(&mut self.max_deliver_input);
@@ -1082,7 +1126,56 @@ impl eframe::App for NatsManagerApp {
             ui.label(&self.jetstream_message);
         }
 
-        if self.active_client.is_some() {
+        if self.current_page == AppPage::Maintenance {
+            ui.label("Destructive actions require typing the exact resource name.");
+            ui.add_space(8.0);
+            if self.active_client.is_none() {
+                ui.weak("Connect to a cluster before managing resources.");
+            } else if let Some(JetStreamStatus::Unavailable(reason)) = &self.jetstream_status {
+                ui.weak(format!("JetStream is unavailable: {reason}"));
+            } else if matches!(
+                &self.jetstream_status,
+                Some(JetStreamStatus::Enabled { .. })
+            ) {
+                    ui.horizontal(|ui| {
+                        ui.strong("Selected stream");
+                        ui.label(self.selected_stream.as_deref().unwrap_or("None"));
+                    });
+                    if let Some(stream) = self.selected_stream.clone() {
+                        ui.label("Type the stream name to delete it or purge its messages.");
+                        ui.text_edit_singleline(&mut self.stream_name_confirmation);
+                        ui.horizontal(|ui| {
+                            if ui.button("Delete stream…").clicked() {
+                                self.delete_selected_stream();
+                            }
+                            if ui.button("Purge stream messages…").clicked() {
+                                self.purge_selected_stream();
+                            }
+                        });
+                        ui.small(format!("Selected: {stream}"));
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.strong("Selected consumer");
+                        ui.label(self.selected_consumer.as_deref().unwrap_or("None"));
+                    });
+                    if let Some(consumer) = self.selected_consumer.clone() {
+                        ui.label("Type the consumer name to delete it.");
+                        ui.text_edit_singleline(&mut self.consumer_name_confirmation);
+                        if ui.button("Delete consumer…").clicked() {
+                            self.delete_selected_consumer();
+                        }
+                        ui.small(format!("Selected: {consumer}"));
+                    }
+            } else {
+                ui.weak("Connect to a cluster before managing resources.");
+            }
+            ui.add_space(8.0);
+            ui.label(&self.jetstream_message);
+        }
+
+        if self.active_client.is_some() && self.current_page == AppPage::Publish {
             ui.add_space(12.0);
             ui.separator();
             ui.heading("Publish message");
@@ -1104,6 +1197,19 @@ impl eframe::App for NatsManagerApp {
             });
             ui.text_edit_multiline(&mut self.publish_payload);
         }
+        if self.current_page == AppPage::Publish && self.active_client.is_none() {
+            ui.weak("Connect to a cluster before publishing messages.");
+        }
+        if self.current_page == AppPage::JetStream
+            && !matches!(
+                &self.jetstream_status,
+                Some(JetStreamStatus::Enabled { .. })
+            )
+        {
+            ui.weak("Connect to a JetStream-enabled cluster to manage streams and consumers.");
+        }
+            });
+        });
 
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
