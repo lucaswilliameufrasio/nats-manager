@@ -21,13 +21,22 @@ This project uses Cargo for Rust dependencies and tooling. Start the desktop app
 cargo run
 ```
 
+### Local NATS test environment
+
+Start two isolated servers: JetStream at `nats://127.0.0.1:4222` and core-only NATS at `nats://127.0.0.1:14223`. Their monitoring endpoints are `http://127.0.0.1:18222` and `http://127.0.0.1:18223`. JetStream data is kept in a named Docker volume.
+
+```sh
+make dev       # prepare/start both NATS servers
+make test-e2e  # ensure the servers are ready, then run the real-server suite
+```
+
+Run `docker compose down` to stop the servers while keeping JetStream data; `docker compose down --volumes` also resets that data. The end-to-end suite uses unique resource names, creates resources on the local servers, validates core and JetStream behavior, and removes temporary streams after each successful flow. Its performance smoke test reports publish latency/throughput for 200 acknowledged JetStream messages and enforces a broad local p95/total-time budget; it is a regression signal, not a hardware-independent benchmark.
+
 Build a release binary with `cargo build --release --locked`. To create a native bundle on the target OS, install the Cargo packaging tool with `cargo install cargo-bundle`, then run `cargo bundle --release`.
 
 The app currently includes connection profiles, NATS CLI context and `.creds` import, password/token/NKey/JWT authentication, TLS/mTLS with imported PEM material stored in the system keychain, JetStream detection, stream and durable-consumer management, message publishing/inspection/replay/purge, and exact-name confirmation for destructive JetStream actions. Context imports do not execute external resolvers such as `env://`, `op://`, or `nsc://`; resolve those values before importing.
 
-NATS integration tests can run against local servers by setting `NATS_URL` to a JetStream-enabled server and `NATS_NO_JS_URL` to a server without JetStream before running `cargo test --test nats_integration`. Without those variables the integration tests return without connecting.
-
-GitHub Actions checks formatting, compilation, Clippy, and tests on Linux and macOS. The Linux job also runs the integration suite against local JetStream-enabled and core-only NATS servers.
+GitHub Actions checks formatting, compilation, Clippy, UI rendering, and the end-to-end suite on Linux and macOS. Linux starts the same two-server Docker Compose environment used for local development; macOS runs the UI rendering and unit tests.
 
 ## Releases
 

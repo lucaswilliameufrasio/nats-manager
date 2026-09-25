@@ -7,6 +7,13 @@ use uuid::Uuid;
 use nats_manager::connection::{self, JetStreamStatus};
 use nats_manager::profile::{Authentication, ConnectionProfile, ProfileStore, TlsConfig};
 
+mod theme;
+mod views;
+
+pub(super) fn configure_theme(context: &egui::Context) {
+    theme::apply(context);
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum AppPage {
     #[default]
@@ -800,418 +807,62 @@ impl eframe::App for NatsManagerApp {
             }
         }
 
-        egui::Panel::left("main_navigation")
-            .resizable(false)
-            .default_size(184.0)
-            .show(ui, |ui| {
-                ui.add_space(8.0);
-                ui.heading("NATS Manager");
-                ui.small(format!("v{}", env!("CARGO_PKG_VERSION")));
-                ui.add_space(20.0);
-                for (page, label) in [
-                    (AppPage::Connections, "Connections"),
-                    (AppPage::Overview, "Overview"),
-                    (AppPage::JetStream, "JetStream"),
-                    (AppPage::Publish, "Publish"),
-                    (AppPage::Maintenance, "Maintenance"),
-                ] {
-                    if ui
-                        .selectable_label(self.current_page == page, label)
-                        .clicked()
-                    {
-                        self.current_page = page;
-                    }
-                }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.separator();
-                    ui.label(if self.active_client.is_some() {
-                        "● Connected"
-                    } else {
-                        "○ Disconnected"
-                    });
-                });
-            });
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading(match self.current_page {
-                    AppPage::Connections => "Connections",
-                    AppPage::Overview => "Cluster overview",
-                    AppPage::JetStream => "JetStream",
-                    AppPage::Publish => "Publish messages",
-                    AppPage::Maintenance => "Maintenance",
-                });
-                ui.add_space(12.0);
-
-                if self.current_page == AppPage::Connections {
-                    ui.label("Connect to existing NATS clusters and manage saved profiles.");
-                    ui.add_space(8.0);
-
-        ui.horizontal(|ui| {
-            ui.label("Server URL");
-            ui.text_edit_singleline(&mut self.server_url);
-            if ui.button("Connect").clicked() {
-                self.connect();
-            }
-        });
-
-        ui.add_space(12.0);
-        ui.separator();
-        ui.heading("Save connection profile");
-        ui.horizontal(|ui| {
-            ui.label("Profile name");
-            ui.text_edit_singleline(&mut self.profile_name);
-        });
-        ui.checkbox(&mut self.use_password_auth, "Use username and password");
-        if self.use_password_auth {
-            ui.horizontal(|ui| {
-                ui.label("Username");
-                ui.text_edit_singleline(&mut self.username);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Password");
-                ui.add(egui::TextEdit::singleline(&mut self.password).password(true));
-            });
-        }
-        if ui.button("Save profile securely").clicked() {
-            self.save_profile();
-        }
-        if ui
-            .button("Import .creds file into system keychain")
-            .clicked()
-        {
-            self.import_credentials_file();
-        }
-        if ui.button("Import NATS CLI context JSON").clicked() {
-            self.import_nats_context();
-        }
-        ui.separator();
-        ui.label("TLS / mTLS (imported PEM files are stored in the system keychain)");
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Import CA certificate").clicked() {
-                self.import_tls_material(TlsMaterial::CaCertificate);
-            }
-            if ui.button("Import client certificate").clicked() {
-                self.import_tls_material(TlsMaterial::ClientCertificate);
-            }
-            if ui.button("Import client private key").clicked() {
-                self.import_tls_material(TlsMaterial::ClientPrivateKey);
-            }
-        });
-        ui.label(format!(
-            "CA: {} · client certificate: {} · private key: {}",
-            self.tls_ca_certificate_key.is_some(),
-            self.tls_client_certificate_key.is_some(),
-            self.tls_client_private_key_key.is_some()
-        ));
-
-        if !self.profiles.is_empty() {
-            ui.add_space(12.0);
-            ui.heading("Saved profiles");
-            for profile in self.profiles.clone() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} — {}", profile.name, profile.servers.join(", ")));
-                    if ui.button("Connect").clicked() {
-                        self.connect_saved_profile(profile);
-                    }
-                });
-            }
-        }
-
-                }
-
-                if self.current_page == AppPage::Overview {
-        ui.add_space(8.0);
-        ui.label(&self.status);
-        if let Some(info) = &self.server_info {
-            egui::Grid::new("nats_server_info")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    ui.label("Server");
-                    ui.label(format!("{} ({})", info.server_name, info.server_id));
-                    ui.end_row();
-                    ui.label("Address");
-                    ui.label(format!("{}:{}", info.host, info.port));
-                    ui.end_row();
-                    ui.label("Cluster / domain");
-                    ui.label(format!(
-                        "{} / {}",
-                        info.cluster.as_deref().unwrap_or("—"),
-                        info.domain.as_deref().unwrap_or("—")
-                    ));
-                    ui.end_row();
-                    ui.label("Max payload / client IP");
-                    ui.label(format!("{} B / {}", info.max_payload, info.client_ip));
-                    ui.end_row();
-                    ui.label("Advertised servers");
-                    ui.label(if info.connect_urls.is_empty() {
-                        "—".to_owned()
-                    } else {
-                        info.connect_urls.join(", ")
-                    });
-                    ui.end_row();
-                });
-        }
-        if let Some(status) = &self.jetstream_status {
-            match status {
-                JetStreamStatus::Enabled {
-                    streams,
-                    consumers,
-                    memory_bytes,
-                    storage_bytes,
-                    domain,
-                } => {
-                    ui.label(format!(
-                        "JetStream enabled · {streams} stream(s) · {consumers} consumer(s) · memory {memory_bytes} B · storage {storage_bytes} B{}",
-                        domain.as_ref().map(|value| format!(" · domain {value}")).unwrap_or_default()
-                    ));
-                }
-                JetStreamStatus::Unavailable(reason) => {
-                    ui.label(format!("JetStream: unavailable ({reason})"));
-                }
-            }
-        }
-        ui.add_space(16.0);
-        if self.active_client.is_none() {
-            ui.weak("Cluster details will appear after connecting.");
-        }
-                }
-
-        if matches!(
-            &self.jetstream_status,
-            Some(JetStreamStatus::Enabled { .. })
-        ) && self.current_page == AppPage::JetStream
-        {
-            ui.add_space(16.0);
-            ui.separator();
-            ui.heading("JetStream");
-            ui.horizontal(|ui| {
-                if ui.button("Refresh streams").clicked() {
-                    self.refresh_streams();
-                }
-                ui.label(format!("{} stream(s)", self.streams.len()));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Stream name");
-                ui.text_edit_singleline(&mut self.new_stream_name);
-                ui.label("Subject");
-                ui.text_edit_singleline(&mut self.new_stream_subject);
-                if ui.button("Create stream").clicked() {
-                    self.create_stream();
-                }
-            });
-
-            let mut selected_stream_changed = false;
-            ui.horizontal_wrapped(|ui| {
-                for stream in self.streams.clone() {
-                    if ui
-                        .selectable_label(self.selected_stream.as_ref() == Some(&stream), &stream)
-                        .clicked()
-                    {
-                        self.selected_stream = Some(stream);
-                        self.selected_consumer = None;
-                        self.consumers.clear();
-                        self.stream_details = None;
-                        selected_stream_changed = true;
-                    }
-                }
-            });
-            if selected_stream_changed {
-                self.refresh_stream_details();
-                self.refresh_consumers();
-            }
-
-            if let Some(stream) = self.selected_stream.clone() {
-                ui.label(format!("Selected stream: {stream}"));
-                if let Some(details) = &self.stream_details {
-                    ui.label(format!(
-                        "Subjects: {} · {} message(s) · {} B · {} consumer(s)",
-                        details.subjects.join(", "),
-                        details.messages,
-                        details.bytes,
-                        details.consumers
-                    ));
-                }
-                ui.horizontal(|ui| {
-                    ui.label("New subject filter");
-                    ui.text_edit_singleline(&mut self.new_stream_subject);
-                    if ui.button("Update stream subject").clicked() {
-                        self.update_selected_stream_subject();
-                    }
-                });
-                if ui.button("Inspect recent messages").clicked() {
-                    self.inspect_recent_messages();
-                }
-
-                ui.separator();
-                ui.heading("Consumers");
-                ui.horizontal(|ui| {
-                    ui.label("New durable pull consumer");
-                    ui.text_edit_singleline(&mut self.new_consumer_name);
-                    if ui.button("Create consumer").clicked() {
-                        self.create_consumer();
-                    }
-                });
-                let mut selected_consumer_changed = false;
-                for consumer in self.consumers.clone() {
-                    if ui
-                        .selectable_label(
-                            self.selected_consumer.as_ref() == Some(&consumer),
-                            &consumer,
-                        )
-                        .clicked()
-                    {
-                        self.selected_consumer = Some(consumer);
-                        selected_consumer_changed = true;
-                    }
-                }
-                if selected_consumer_changed {
-                    self.refresh_consumer_details();
-                }
-                if let Some(consumer) = self.selected_consumer.clone() {
-                    ui.label(format!("Selected consumer: {consumer}"));
-                    ui.horizontal(|ui| {
-                        ui.label("Max deliveries");
-                        ui.text_edit_singleline(&mut self.max_deliver_input);
-                        ui.label("Ack wait (seconds)");
-                        ui.text_edit_singleline(&mut self.ack_wait_input);
-                        if ui.button("Update consumer limits").clicked() {
-                            self.update_selected_consumer_limits();
-                        }
-                    });
-                }
-
-                ui.separator();
-                ui.heading("Recent messages");
-                for message in self.messages.clone() {
-                    let preview = String::from_utf8_lossy(&message.payload);
-                    let preview = preview.chars().take(160).collect::<String>();
-                    let headers = message
-                        .headers
-                        .iter()
-                        .map(|(name, values)| {
-                            format!(
-                                "{}: {}",
-                                name,
-                                values
-                                    .iter()
-                                    .map(|value| value.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    ui.selectable_value(
-                        &mut self.selected_message,
-                        Some(message.sequence),
-                        format!(
-                            "#{} {} — {}{}",
-                            message.sequence,
-                            message.subject,
-                            preview,
-                            if headers.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · {headers}")
-                            }
-                        ),
-                    );
-                }
-                if self.selected_message.is_some() && ui.button("Replay selected message").clicked()
-                {
-                    self.replay_selected_message();
-                }
-            }
-            ui.label(&self.jetstream_message);
-        }
-
-        if self.current_page == AppPage::Maintenance {
-            ui.label("Destructive actions require typing the exact resource name.");
-            ui.add_space(8.0);
-            if self.active_client.is_none() {
-                ui.weak("Connect to a cluster before managing resources.");
-            } else if let Some(JetStreamStatus::Unavailable(reason)) = &self.jetstream_status {
-                ui.weak(format!("JetStream is unavailable: {reason}"));
-            } else if matches!(
-                &self.jetstream_status,
-                Some(JetStreamStatus::Enabled { .. })
-            ) {
-                    ui.horizontal(|ui| {
-                        ui.strong("Selected stream");
-                        ui.label(self.selected_stream.as_deref().unwrap_or("None"));
-                    });
-                    if let Some(stream) = self.selected_stream.clone() {
-                        ui.label("Type the stream name to delete it or purge its messages.");
-                        ui.text_edit_singleline(&mut self.stream_name_confirmation);
-                        ui.horizontal(|ui| {
-                            if ui.button("Delete stream…").clicked() {
-                                self.delete_selected_stream();
-                            }
-                            if ui.button("Purge stream messages…").clicked() {
-                                self.purge_selected_stream();
-                            }
-                        });
-                        ui.small(format!("Selected: {stream}"));
-                    }
-
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.strong("Selected consumer");
-                        ui.label(self.selected_consumer.as_deref().unwrap_or("None"));
-                    });
-                    if let Some(consumer) = self.selected_consumer.clone() {
-                        ui.label("Type the consumer name to delete it.");
-                        ui.text_edit_singleline(&mut self.consumer_name_confirmation);
-                        if ui.button("Delete consumer…").clicked() {
-                            self.delete_selected_consumer();
-                        }
-                        ui.small(format!("Selected: {consumer}"));
-                    }
-            } else {
-                ui.weak("Connect to a cluster before managing resources.");
-            }
-            ui.add_space(8.0);
-            ui.label(&self.jetstream_message);
-        }
-
-        if self.active_client.is_some() && self.current_page == AppPage::Publish {
-            ui.add_space(12.0);
-            ui.separator();
-            ui.heading("Publish message");
-            if matches!(
-                &self.jetstream_status,
-                Some(JetStreamStatus::Enabled { .. })
-            ) {
-                ui.checkbox(
-                    &mut self.publish_via_jetstream,
-                    "Publish through JetStream (requires a matching stream)",
-                );
-            }
-            ui.horizontal(|ui| {
-                ui.label("Subject");
-                ui.text_edit_singleline(&mut self.publish_subject);
-                if ui.button("Publish").clicked() {
-                    self.publish_message();
-                }
-            });
-            ui.text_edit_multiline(&mut self.publish_payload);
-        }
-        if self.current_page == AppPage::Publish && self.active_client.is_none() {
-            ui.weak("Connect to a cluster before publishing messages.");
-        }
-        if self.current_page == AppPage::JetStream
-            && !matches!(
-                &self.jetstream_status,
-                Some(JetStreamStatus::Enabled { .. })
-            )
-        {
-            ui.weak("Connect to a JetStream-enabled cluster to manage streams and consumers.");
-        }
-            });
-        });
+        views::show(self, ui);
 
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{AppPage, NatsManagerApp, theme, views};
+
+    #[test]
+    fn every_product_screen_renders_headlessly_within_frame_budget() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should start");
+        let mut app = NatsManagerApp::new(runtime);
+        let context = eframe::egui::Context::default();
+        theme::apply(&context);
+        assert_eq!(context.theme(), eframe::egui::Theme::Dark);
+        assert_eq!(
+            context
+                .style_of(eframe::egui::Theme::Dark)
+                .visuals
+                .panel_fill,
+            theme::CANVAS
+        );
+        let mut frame_times = Vec::new();
+
+        for page in [
+            AppPage::Overview,
+            AppPage::Connections,
+            AppPage::JetStream,
+            AppPage::Publish,
+            AppPage::Maintenance,
+        ] {
+            app.current_page = page;
+            let started = Instant::now();
+            let mut output = context.run_ui(eframe::egui::RawInput::default(), |ui| {
+                views::show(&mut app, ui);
+            });
+            frame_times.push(started.elapsed());
+            assert!(
+                !output.shapes.is_empty(),
+                "{page:?} should render visible UI shapes"
+            );
+            output.textures_delta.clear();
+        }
+
+        let slowest = frame_times.into_iter().max().unwrap_or(Duration::ZERO);
+        assert!(
+            slowest < Duration::from_millis(500),
+            "headless screen rendering exceeded the 500ms smoke budget: {slowest:?}"
+        );
     }
 }
